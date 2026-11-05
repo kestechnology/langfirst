@@ -50,9 +50,11 @@ export default function Home() {
   // Audio Pipeline for live Web Audio capture, 16kHz WAV rolling slicing & volume metering
   const {
     isRecording,
+    isConnecting,
     audioLevel,
     isSpeaking,
     error: audioError,
+    clearError,
     startRecording,
     stopRecording,
   } = useAudioPipeline({
@@ -76,7 +78,8 @@ export default function Home() {
       stopRecording();
       setActiveStatus('idle');
     } else {
-      setActiveStatus('listening');
+      setActiveStatus('connecting');
+      clearError();
       await startRecording();
     }
   };
@@ -121,6 +124,8 @@ export default function Home() {
   // Derive unified pipeline status
   const currentStatus: PipelineStatus = (audioError || sessionError)
     ? 'error'
+    : isConnecting || (activeStatus === 'connecting' && !isRecording)
+    ? 'connecting'
     : isTranslating
     ? 'analyzing'
     : isSpeaking

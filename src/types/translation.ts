@@ -1,4 +1,10 @@
-export type PipelineStatus = 'idle' | 'listening' | 'speech_detected' | 'analyzing' | 'error';
+export type PipelineStatus =
+  | 'idle'
+  | 'connecting'
+  | 'listening'
+  | 'speech_detected'
+  | 'analyzing'
+  | 'error';
 
 export interface TranslationMessage {
   id: string;
@@ -18,4 +24,3 @@ export interface StreamChunkResponse {
   is_final?: boolean;
   error?: string;
 }
-

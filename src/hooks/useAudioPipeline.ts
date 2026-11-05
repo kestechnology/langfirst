@@ -19,9 +19,14 @@ export function useAudioPipeline({
   silenceFlushDelayMs = 600,
 }: UseAudioPipelineOptions = {}) {
   const [isRecording, setIsRecording] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const clearError = useCallback(() => {
+    setError(null);
+  }, []);
 
   const streamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -126,6 +131,7 @@ export function useAudioPipeline({
   const startRecording = useCallback(async () => {
     try {
       console.log('[AudioPipeline] Requesting microphone access...');
+      setIsConnecting(true);
       setError(null);
       sampleBufferRef.current = [];
       totalSamplesRef.current = 0;
@@ -214,12 +220,15 @@ export function useAudioPipeline({
       console.error('[AudioPipeline] Failed to start:', err);
       setError(msg);
       setIsRecording(false);
+    } finally {
+      setIsConnecting(false);
     }
   }, [chunkDurationMs, flushBuffer, monitorVolume]);
 
   // Stop recording
   const stopRecording = useCallback(() => {
     console.log('[AudioPipeline] Stopping recording...');
+    setIsConnecting(false);
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
@@ -267,9 +276,11 @@ export function useAudioPipeline({
 
   return {
     isRecording,
+    isConnecting,
     audioLevel,
     isSpeaking,
     error,
+    clearError,
     startRecording,
     stopRecording,
   };

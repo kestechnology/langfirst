@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { PipelineStatus } from '@/types/translation';
-import { Mic, MicOff, Radio, Square, Volume2 } from 'lucide-react';
+import { AlertCircle, Loader2, Mic, Radio, Square } from 'lucide-react';
 
 interface AudioControlBarProps {
   status: PipelineStatus;
@@ -17,7 +17,29 @@ export function AudioControlBar({
   onToggleMic,
   latencyMs,
 }: AudioControlBarProps) {
-  const isListening = status === 'listening' || status === 'speech_detected' || status === 'analyzing';
+  const isListening =
+    status === 'listening' ||
+    status === 'speech_detected' ||
+    status === 'analyzing' ||
+    status === 'connecting';
+
+  const getStatusText = () => {
+    switch (status) {
+      case 'connecting':
+        return 'Connecting...';
+      case 'speech_detected':
+        return 'Speaking...';
+      case 'listening':
+        return 'Listening...';
+      case 'analyzing':
+        return 'Translating...';
+      case 'error':
+        return 'Click to retry';
+      case 'idle':
+      default:
+        return 'Tap to speak';
+    }
+  };
 
   return (
     <footer className="sticky bottom-0 z-20 backdrop-blur-xl bg-neutral-950/90 border-t border-neutral-800/80 p-4 sm:p-5">
@@ -29,7 +51,7 @@ export function AudioControlBar({
             Vercel + Whisper & Claude
           </span>
           <span className="text-[10px] text-neutral-500 font-mono">
-            {latencyMs ? `Latency: ~${latencyMs}ms` : 'Target: <800ms'}
+            {latencyMs ? `Latency: ~${latencyMs}ms` : 'Ready'}
           </span>
         </div>
 
@@ -39,17 +61,25 @@ export function AudioControlBar({
           <div className="flex items-center gap-1 h-8 px-2">
             {[0.4, 0.7, 1.0, 0.6, 0.9, 0.5, 0.3].map((multiplier, i) => {
               const height = isListening
-                ? Math.max(6, Math.min(28, (audioLevel * multiplier * 36) + (status === 'speech_detected' ? 12 : 4)))
+                ? Math.max(
+                    6,
+                    Math.min(
+                      28,
+                      audioLevel * multiplier * 36 +
+                        (status === 'speech_detected' ? 14 : 4)
+                    )
+                  )
                 : 4;
               return (
                 <div
                   key={i}
-                  className={`w-1 rounded-full transition-all duration-75 ${isListening
+                  className={`w-1 rounded-full transition-all duration-75 ${
+                    isListening
                       ? status === 'speech_detected'
                         ? 'bg-amber-400'
                         : 'bg-emerald-400'
                       : 'bg-neutral-700'
-                    }`}
+                  }`}
                   style={{ height: `${height}px` }}
                 />
               );
@@ -75,12 +105,18 @@ export function AudioControlBar({
               }}
               aria-label={isListening ? 'Stop Listening' : 'Start Listening'}
               className={`relative z-10 w-14 h-14 rounded-full flex items-center justify-center text-white shadow-xl cursor-pointer transition-all transform active:scale-95 ${
-                isListening
+                status === 'error'
+                  ? 'bg-rose-600 hover:bg-rose-700 ring-4 ring-rose-500/30'
+                  : isListening
                   ? 'bg-rose-500 hover:bg-rose-600 shadow-rose-500/25 ring-4 ring-rose-500/20'
                   : 'bg-gradient-to-tr from-indigo-500 via-indigo-600 to-emerald-500 hover:opacity-95 shadow-indigo-500/30'
               }`}
             >
-              {isListening ? (
+              {status === 'connecting' ? (
+                <Loader2 className="w-6 h-6 animate-spin text-white" />
+              ) : status === 'error' ? (
+                <AlertCircle className="w-6 h-6 text-white" />
+              ) : isListening ? (
                 <Square className="w-5 h-5 fill-current" />
               ) : (
                 <Mic className="w-6 h-6" />
@@ -89,8 +125,8 @@ export function AudioControlBar({
           </div>
 
           {/* Audio hint */}
-          <span className="text-xs font-medium text-neutral-300 w-24">
-            {isListening ? (status === 'speech_detected' ? 'Speaking...' : 'Listening...') : 'Tap to start'}
+          <span className="text-xs font-medium text-neutral-300 w-28">
+            {getStatusText()}
           </span>
         </div>
 
@@ -104,4 +140,3 @@ export function AudioControlBar({
     </footer>
   );
 }
-

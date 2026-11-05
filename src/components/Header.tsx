@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { PipelineStatus } from '@/types/translation';
-import { FileText, History, Languages, Sparkles, Upload } from 'lucide-react';
+import { AlertCircle, FileText, History, Languages, Loader2, Sparkles, Upload } from 'lucide-react';
 
 interface HeaderProps {
   status: PipelineStatus;
@@ -27,6 +27,13 @@ export function Header({
 }: HeaderProps) {
   const getStatusBadge = () => {
     switch (status) {
+      case 'connecting':
+        return (
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
+            <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
+            Requesting Mic...
+          </span>
+        );
       case 'listening':
         return (
           <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
@@ -51,8 +58,8 @@ export function Header({
       case 'error':
         return (
           <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20">
-            <span className="w-2 h-2 rounded-full bg-rose-500" />
-            Error
+            <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
+            Mic Error
           </span>
         );
       case 'idle':
