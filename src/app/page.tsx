@@ -6,57 +6,30 @@ import { DialogueStream } from '@/components/DialogueStream';
 import { AudioControlBar } from '@/components/AudioControlBar';
 import { AudioUploadModal } from '@/components/AudioUploadModal';
 import { HistoryDrawer } from '@/components/HistoryDrawer';
+import { ConversationReportModal } from '@/components/ConversationReportModal';
 import { TranslationMessage, PipelineStatus } from '@/types/translation';
 import { useAudioPipeline } from '@/hooks/useAudioPipeline';
-import { useVadPipeline } from '@/hooks/useVadPipeline';
 import { useTranslationStream } from '@/hooks/useTranslationStream';
 import { saveSession } from '@/lib/storage/transcriptStorage';
 import { AlertTriangle } from 'lucide-react';
-
-const INITIAL_DEMO_MESSAGES: TranslationMessage[] = [
-  {
-    id: 'demo-1',
-    speaker: 'Speaker A',
-    detected_lang: 'Esan',
-    transcription: 'Ọ nan a gbe erọlọ',
-    translation: 'It takes patience and perseverance.',
-    is_final: true,
-    timestamp: 1730800000000,
-  },
-  {
-    id: 'demo-2',
-    speaker: 'Speaker B',
-    detected_lang: 'Nigerian English',
-    transcription: 'True talk my brother, we go dey alright.',
-    translation: 'That is the absolute truth my brother, we will be fine.',
-    is_final: true,
-    timestamp: 1730800060000,
-  },
-  {
-    id: 'demo-3',
-    speaker: 'Speaker A',
-    detected_lang: 'Esan',
-    transcription: 'Ọya waigbe, ẹkpafọ kẹina.',
-    translation: 'Perseverance is key, that is all that matters.',
-    is_final: true,
-    timestamp: 1730800120000,
-  },
-];
 
 export default function Home() {
   const [activeStatus, setActiveStatus] = useState<PipelineStatus>('idle');
   const [isBilingual, setIsBilingual] = useState<boolean>(true);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [isReportOpen, setIsReportOpen] = useState(false);
+  const [reportContent, setReportContent] = useState<string | null>(null);
+  const [isReportLoading, setIsReportLoading] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
 
   useEffect(() => {
     setIsMounted(true);
   }, []);
 
-  // Translation stream hook with retry and session rollover
+  // Translation stream hook
   const {
-    messages: liveMessages,
+    messages,
     interimMessage,
     isTranslating,
     latestLatencyMs,
@@ -69,81 +42,90 @@ export default function Home() {
       setActiveStatus(newStatus);
     },
     onNewMessage: (newMsg) => {
-      // Auto-save to local storage when new message arrives
-      saveSession([...liveMessages, newMsg]);
+      // Auto-save session to local storage when new message arrives
+      saveSession([...messages, newMsg]);
     },
   });
 
-  // Display initial demo messages until live messages start arriving
-  const displayMessages = liveMessages.length > 0 ? liveMessages : INITIAL_DEMO_MESSAGES;
-
-  // VAD Pipeline for client-side voice activity detection & dynamic slicing
-  const {
-    isVadActive,
-    isSpeaking,
-    isLoading: isVadLoading,
-    error: vadError,
-    startVad,
-    stopVad,
-  } = useVadPipeline({
-    onSpeechSlice: (sliceBlob, durationMs, isFinal) => {
-      processAudioSlice(sliceBlob, durationMs, isFinal);
-    },
-    onSpeechStart: () => {
-      setActiveStatus('speech_detected');
-    },
-    onSpeechEnd: () => {
-      setActiveStatus('analyzing');
-    },
-  });
-
-  // Audio Pipeline for live Web Audio frequency, waveform & volume diagnostics
+  // Audio Pipeline for live Web Audio capture, 16kHz WAV rolling slicing & volume metering
   const {
     isRecording,
     audioLevel,
+    isSpeaking,
     error: audioError,
-    lowVolumeWarning,
     startRecording,
     stopRecording,
   } = useAudioPipeline({
     onAudioChunkReady: (chunkBlob, durationMs) => {
-      // If Silero VAD is active, it handles speech slicing.
-      // If VAD is in fallback mode or inactive, Web Audio slices are streamed on speech activity!
-      if (!isVadActive && audioLevel > 0.03) {
-        processAudioSlice(chunkBlob, durationMs, true);
+      // Audio slice captured: dispatch to translation engine
+      console.log(`[AudioPipeline] Captured speech slice: ${chunkBlob.size} bytes (${durationMs}ms)`);
+      processAudioSlice(chunkBlob, durationMs, true);
+    },
+    onSpeechActivityChange: (speaking) => {
+      if (speaking) {
+        setActiveStatus('speech_detected');
+      } else {
+        setActiveStatus('listening');
       }
     },
-    chunkIntervalMs: 2200,
+    chunkDurationMs: 2200,
   });
 
   const handleToggleMic = async () => {
-    if (isRecording || isVadActive) {
+    if (isRecording) {
       stopRecording();
-      stopVad();
       setActiveStatus('idle');
     } else {
       setActiveStatus('listening');
       await startRecording();
-      await startVad();
     }
   };
 
   const handleClear = () => {
     clearMessages();
+    setReportContent(null);
   };
 
   const handleLoadSession = (loadedMessages: TranslationMessage[]) => {
     setManualMessages(loadedMessages);
   };
 
+  // Generate Executive Conversation Report
+  const handleGenerateReport = async () => {
+    if (messages.length === 0) return;
+
+    try {
+      setIsReportOpen(true);
+      setIsReportLoading(true);
+
+      const res = await fetch('/api/generate-report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages }),
+      });
+
+      if (!res.ok) {
+        throw new Error('Failed to generate report.');
+      }
+
+      const data = await res.json();
+      setReportContent(data.report || 'Report could not be generated.');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Report generation error';
+      setReportContent(`Error: ${msg}`);
+    } finally {
+      setIsReportLoading(false);
+    }
+  };
+
   // Derive unified pipeline status
-  const currentStatus: PipelineStatus = (audioError || vadError || sessionError)
+  const currentStatus: PipelineStatus = (audioError || sessionError)
     ? 'error'
     : isTranslating
     ? 'analyzing'
     : isSpeaking
     ? 'speech_detected'
-    : isRecording || isVadActive
+    : isRecording
     ? 'listening'
     : 'idle';
 
@@ -157,27 +139,20 @@ export default function Home() {
         onClear={handleClear}
         onOpenUpload={() => setIsUploadOpen(true)}
         onOpenHistory={() => setIsHistoryOpen(true)}
-        messageCount={displayMessages.length}
+        onGenerateReport={handleGenerateReport}
+        messageCount={messages.length}
       />
 
-      {/* Low volume diagnostic alert */}
-      {lowVolumeWarning && isRecording && (
-        <div className="bg-amber-950/80 border-b border-amber-800 text-amber-200 px-4 py-1.5 text-xs flex items-center justify-center gap-1.5 animate-in fade-in">
-          <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
-          Low microphone input detected. Please speak closer or check your microphone selector.
-        </div>
-      )}
-
       {/* Error banner if microphone access or session fails */}
-      {(audioError || vadError || sessionError) && (
+      {(audioError || sessionError) && (
         <div className="bg-rose-950/80 border-b border-rose-800 text-rose-200 px-4 py-2 text-xs text-center">
-          {audioError || vadError || sessionError}
+          {audioError || sessionError}
         </div>
       )}
 
       {/* Central Dialogue Stream */}
       <DialogueStream
-        messages={displayMessages}
+        messages={messages}
         interimMessage={interimMessage}
         status={currentStatus}
         isBilingual={isBilingual}
@@ -196,7 +171,7 @@ export default function Home() {
       <AudioUploadModal
         isOpen={isUploadOpen}
         onClose={() => setIsUploadOpen(false)}
-        onBatchComplete={(newMsgs) => setManualMessages([...liveMessages, ...newMsgs])}
+        onBatchComplete={(newMsgs) => setManualMessages([...messages, ...newMsgs])}
         onProcessSlice={processAudioSlice}
       />
 
@@ -204,9 +179,17 @@ export default function Home() {
       <HistoryDrawer
         isOpen={isHistoryOpen}
         onClose={() => setIsHistoryOpen(false)}
-        currentMessages={displayMessages}
+        currentMessages={messages}
         isBilingual={isBilingual}
         onLoadSession={handleLoadSession}
+      />
+
+      {/* Conversation Report Modal */}
+      <ConversationReportModal
+        isOpen={isReportOpen}
+        onClose={() => setIsReportOpen(false)}
+        reportContent={reportContent}
+        isLoading={isReportLoading}
       />
     </div>
   );

@@ -1,162 +1,226 @@
 'use client';
 
 import { useState, useRef, useCallback, useEffect } from 'react';
-import {
-  DEFAULT_AUDIO_CONFIG,
-  getSupportedMimeType,
-} from '@/lib/audio/audioPipeline';
+import { encodeWAV } from '@/lib/audio/wavEncoder';
 
 export interface UseAudioPipelineOptions {
   onAudioChunkReady?: (blob: Blob, durationMs: number) => void;
-  chunkIntervalMs?: number; // Time slicing interval (e.g., 2000ms for 2s slices)
+  onSpeechActivityChange?: (isSpeaking: boolean) => void;
+  chunkDurationMs?: number; // dispatch rolling speech slices every ~2000ms
+  silenceThreshold?: number; // RMS volume threshold for speech detection
+  silenceFlushDelayMs?: number; // ms of silence before flushing an utterance
 }
 
 export function useAudioPipeline({
   onAudioChunkReady,
-  chunkIntervalMs = 2000,
+  onSpeechActivityChange,
+  chunkDurationMs = 2200,
+  silenceThreshold = 0.025,
+  silenceFlushDelayMs = 600,
 }: UseAudioPipelineOptions = {}) {
   const [isRecording, setIsRecording] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [lowVolumeWarning, setLowVolumeWarning] = useState(false);
 
   const streamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
-  const chunkStartTimeRef = useRef<number>(0);
-  const recordedChunksRef = useRef<Blob[]>([]);
-  const silenceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const maxVolumeSeenRef = useRef<number>(0);
 
-  // Real-time audio level monitoring loop using Web Audio API AnalyserNode
-  const monitorAudioLevels = useCallback(() => {
+  // Audio sample buffer
+  const sampleBufferRef = useRef<Float32Array[]>([]);
+  const totalSamplesRef = useRef<number>(0);
+  const lastSpeechTimeRef = useRef<number>(0);
+  const sliceStartTimeRef = useRef<number>(0);
+  const isSpeakingStateRef = useRef<boolean>(false);
+  const flushTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Helper to flush current buffer into a 16kHz WAV blob
+  const flushBuffer = useCallback(() => {
+    if (sampleBufferRef.current.length === 0 || totalSamplesRef.current === 0) {
+      return;
+    }
+
+    const totalLength = totalSamplesRef.current;
+    const merged = new Float32Array(totalLength);
+    let offset = 0;
+
+    for (const buf of sampleBufferRef.current) {
+      merged.set(buf, offset);
+      offset += buf.length;
+    }
+
+    const durationMs = Math.round((totalLength / 16000) * 1000);
+
+    // Only dispatch if buffer contains at least 500ms of audio
+    if (durationMs >= 500) {
+      const wavBlob = encodeWAV(merged, 16000);
+      if (onAudioChunkReady) {
+        onAudioChunkReady(wavBlob, durationMs);
+      }
+    }
+
+    sampleBufferRef.current = [];
+    totalSamplesRef.current = 0;
+    sliceStartTimeRef.current = Date.now();
+  }, [onAudioChunkReady]);
+
+  // Volume monitoring loop
+  const monitorVolume = useCallback(() => {
     if (!analyserRef.current) return;
 
     const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
     analyserRef.current.getByteFrequencyData(dataArray);
 
-    // Calculate RMS/average volume
     let sum = 0;
     for (let i = 0; i < dataArray.length; i++) {
       sum += dataArray[i];
     }
-    const average = sum / dataArray.length;
-    // Normalize to 0 - 1 range
-    const normalizedLevel = Math.min(1, Math.max(0, average / 128));
-    setAudioLevel(normalizedLevel);
+    const avg = sum / dataArray.length;
+    const normalized = Math.min(1, Math.max(0, avg / 128));
+    setAudioLevel(normalized);
 
-    if (normalizedLevel > maxVolumeSeenRef.current) {
-      maxVolumeSeenRef.current = normalizedLevel;
+    const now = Date.now();
+    const hasVoice = normalized > silenceThreshold;
+
+    if (hasVoice) {
+      lastSpeechTimeRef.current = now;
+      if (!isSpeakingStateRef.current) {
+        isSpeakingStateRef.current = true;
+        setIsSpeaking(true);
+        onSpeechActivityChange?.(true);
+      }
+
+      if (flushTimeoutRef.current) {
+        clearTimeout(flushTimeoutRef.current);
+        flushTimeoutRef.current = null;
+      }
+    } else {
+      // If was speaking, and silence has lasted longer than silenceFlushDelayMs
+      if (
+        isSpeakingStateRef.current &&
+        now - lastSpeechTimeRef.current > silenceFlushDelayMs
+      ) {
+        isSpeakingStateRef.current = false;
+        setIsSpeaking(false);
+        onSpeechActivityChange?.(false);
+
+        // Schedule flush on speech pause
+        if (!flushTimeoutRef.current) {
+          flushTimeoutRef.current = setTimeout(() => {
+            flushBuffer();
+            flushTimeoutRef.current = null;
+          }, 150);
+        }
+      }
     }
 
-    animationFrameRef.current = requestAnimationFrame(monitorAudioLevels);
-  }, []);
+    animationFrameRef.current = requestAnimationFrame(monitorVolume);
+  }, [flushBuffer, onSpeechActivityChange, silenceFlushDelayMs, silenceThreshold]);
 
-  // Start recording & Web Audio pipeline
+  // Start recording
   const startRecording = useCallback(async () => {
     try {
       setError(null);
-      setLowVolumeWarning(false);
-      maxVolumeSeenRef.current = 0;
+      sampleBufferRef.current = [];
+      totalSamplesRef.current = 0;
+      sliceStartTimeRef.current = Date.now();
 
       if (!navigator?.mediaDevices?.getUserMedia) {
-        throw new Error('Microphone audio capture is not supported in this browser.');
+        throw new Error('Microphone access is not supported in this browser.');
       }
 
-      // 1. Request microphone with 16kHz mono, echo cancellation & noise suppression
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          sampleRate: DEFAULT_AUDIO_CONFIG.sampleRate,
-          channelCount: DEFAULT_AUDIO_CONFIG.channelCount,
-          echoCancellation: DEFAULT_AUDIO_CONFIG.echoCancellation,
-          noiseSuppression: DEFAULT_AUDIO_CONFIG.noiseSuppression,
-          autoGainControl: DEFAULT_AUDIO_CONFIG.autoGainControl,
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
         },
       });
-
       streamRef.current = stream;
 
-      // 2. Initialize Web Audio API for live frequency & level analysis
-      const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      const audioCtx = new AudioContextClass({
-        sampleRate: DEFAULT_AUDIO_CONFIG.sampleRate,
-      });
+      const AudioContextClass =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const audioCtx = new AudioContextClass({ sampleRate: 16000 });
       audioContextRef.current = audioCtx;
 
-      const sourceNode = audioCtx.createMediaStreamSource(stream);
+      const source = audioCtx.createMediaStreamSource(stream);
+
+      // Analyser for real-time visual meter
       const analyser = audioCtx.createAnalyser();
       analyser.fftSize = 256;
-      analyser.smoothingTimeConstant = 0.5;
-      sourceNode.connect(analyser);
+      analyser.smoothingTimeConstant = 0.4;
+      source.connect(analyser);
       analyserRef.current = analyser;
 
-      // Start volume analysis loop
-      monitorAudioLevels();
+      // ScriptProcessor for collecting raw 16kHz PCM samples directly
+      const bufferSize = 4096;
+      const processor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+      processorRef.current = processor;
 
-      // Check for prolonged low volume after 6 seconds of recording
-      if (silenceTimeoutRef.current) clearTimeout(silenceTimeoutRef.current);
-      silenceTimeoutRef.current = setTimeout(() => {
-        if (maxVolumeSeenRef.current < 0.03) {
-          setLowVolumeWarning(true);
-        }
-      }, 6000);
+      processor.onaudioprocess = (e) => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        // Copy audio data to buffer
+        const copy = new Float32Array(inputData.length);
+        copy.set(inputData);
 
-      // 3. Initialize MediaRecorder for rolling Opus/WebM audio slice capture
-      const mimeType = getSupportedMimeType();
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-      mediaRecorderRef.current = recorder;
-      recordedChunksRef.current = [];
-      chunkStartTimeRef.current = Date.now();
+        sampleBufferRef.current.push(copy);
+        totalSamplesRef.current += copy.length;
 
-      recorder.ondataavailable = (event) => {
-        if (event.data && event.data.size > 0) {
-          recordedChunksRef.current.push(event.data);
-          const duration = Date.now() - chunkStartTimeRef.current;
-          const chunkBlob = new Blob(recordedChunksRef.current, {
-            type: recorder.mimeType || 'audio/webm',
-          });
+        const currentDurationMs = (totalSamplesRef.current / 16000) * 1000;
 
-          // Reset chunk buffer for the next rolling slice
-          recordedChunksRef.current = [];
-          chunkStartTimeRef.current = Date.now();
-
-          if (onAudioChunkReady) {
-            onAudioChunkReady(chunkBlob, duration);
+        // Dynamic continuous speech segmenting: flush rolling slices every ~2.2s
+        if (currentDurationMs >= chunkDurationMs) {
+          // Only flush if user has been speaking recently
+          if (Date.now() - lastSpeechTimeRef.current < 1500) {
+            flushBuffer();
+          } else {
+            // Discard prolonged silence buffer to avoid wasting API calls
+            sampleBufferRef.current = [];
+            totalSamplesRef.current = 0;
           }
         }
       };
 
-      // Slice audio chunks at specified interval
-      recorder.start(chunkIntervalMs);
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+
+      monitorVolume();
       setIsRecording(true);
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Failed to access microphone.';
-      setError(message);
+      const msg = err instanceof Error ? err.message : 'Microphone access failed.';
+      setError(msg);
       setIsRecording(false);
     }
-  }, [chunkIntervalMs, monitorAudioLevels, onAudioChunkReady]);
+  }, [chunkDurationMs, flushBuffer, monitorVolume]);
 
-  // Stop recording and clean up Web Audio resources
+  // Stop recording
   const stopRecording = useCallback(() => {
-    if (silenceTimeoutRef.current) {
-      clearTimeout(silenceTimeoutRef.current);
-      silenceTimeoutRef.current = null;
-    }
-
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
     }
 
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
-      mediaRecorderRef.current = null;
+    if (flushTimeoutRef.current) {
+      clearTimeout(flushTimeoutRef.current);
+      flushTimeoutRef.current = null;
+    }
+
+    // Flush any pending speech buffer on stop
+    flushBuffer();
+
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current = null;
     }
 
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
     }
 
@@ -166,11 +230,11 @@ export function useAudioPipeline({
     }
 
     setIsRecording(false);
+    setIsSpeaking(false);
     setAudioLevel(0);
-    setLowVolumeWarning(false);
-  }, []);
+    isSpeakingStateRef.current = false;
+  }, [flushBuffer]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       stopRecording();
@@ -180,8 +244,8 @@ export function useAudioPipeline({
   return {
     isRecording,
     audioLevel,
+    isSpeaking,
     error,
-    lowVolumeWarning,
     startRecording,
     stopRecording,
   };

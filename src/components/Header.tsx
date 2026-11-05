@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { PipelineStatus } from '@/types/translation';
-import { Clock, History, Languages, Sparkles, Upload } from 'lucide-react';
+import { FileText, History, Languages, Sparkles, Upload } from 'lucide-react';
 
 interface HeaderProps {
   status: PipelineStatus;
@@ -11,6 +11,7 @@ interface HeaderProps {
   onClear: () => void;
   onOpenUpload: () => void;
   onOpenHistory: () => void;
+  onGenerateReport: () => void;
   messageCount: number;
 }
 
@@ -21,6 +22,7 @@ export function Header({
   onClear,
   onOpenUpload,
   onOpenHistory,
+  onGenerateReport,
   messageCount,
 }: HeaderProps) {
   const getStatusBadge = () => {
@@ -58,7 +60,7 @@ export function Header({
         return (
           <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-neutral-800 text-neutral-400 border border-neutral-700">
             <span className="w-2 h-2 rounded-full bg-neutral-500" />
-            Idle
+            Ready
           </span>
         );
     }
@@ -78,7 +80,7 @@ export function Header({
             <div className="flex items-center gap-2">
               <h1 className="text-base font-semibold tracking-tight text-white">LangFirst</h1>
               <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-400 font-mono">
-                MVP
+                Live
               </span>
             </div>
             <p className="text-xs text-neutral-400 flex items-center gap-1.5">
@@ -94,8 +96,20 @@ export function Header({
           {getStatusBadge()}
         </div>
 
-        {/* Right Controls: Mode Toggle & Actions */}
+        {/* Right Controls */}
         <div className="flex items-center gap-2 sm:gap-2.5">
+          {/* Executive Report Button */}
+          {messageCount > 0 && (
+            <button
+              onClick={onGenerateReport}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-indigo-300 hover:text-white bg-indigo-950/60 border border-indigo-800/60 hover:bg-indigo-900/60 transition-colors shadow-sm"
+              title="Generate Conversation Executive Report"
+            >
+              <FileText className="w-3.5 h-3.5 text-indigo-400" />
+              <span className="hidden sm:inline">Report</span>
+            </button>
+          )}
+
           {/* Upload Button */}
           <button
             onClick={onOpenUpload}

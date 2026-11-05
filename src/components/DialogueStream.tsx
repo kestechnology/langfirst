@@ -67,21 +67,33 @@ export function DialogueStream({
       {messages.length === 0 && !interimMessage && (
         <div className="h-full min-h-[380px] flex flex-col items-center justify-center text-center px-4">
           <div className="w-16 h-16 rounded-2xl bg-neutral-900 border border-neutral-800 flex items-center justify-center mb-4 text-neutral-500 shadow-inner">
-            <Mic className="w-7 h-7 text-neutral-400 animate-pulse" />
+            <Mic
+              className={`w-7 h-7 ${
+                status === 'listening' || status === 'speech_detected'
+                  ? 'text-emerald-400 animate-pulse'
+                  : 'text-neutral-400'
+              }`}
+            />
           </div>
           <h2 className="text-lg font-medium text-white mb-1">
-            Real-Time Esan to English Translation
+            {status === 'listening' || status === 'speech_detected'
+              ? 'Listening to speech...'
+              : 'Ready for Conversation'}
           </h2>
           <p className="text-sm text-neutral-400 max-w-md mb-6 leading-relaxed">
-            Speak in Esan (Central Edo) or Nigerian English. Speech will be processed in rolling slices with live bilingual subtitles.
+            {status === 'listening' || status === 'speech_detected'
+              ? 'Speak in Esan or Nigerian English. Translations will appear here in real time.'
+              : 'Tap the microphone below to start real-time bilingual translation.'}
           </p>
-          <button
-            onClick={onStartListening}
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-emerald-500 text-white text-sm font-medium hover:opacity-90 transition-opacity shadow-lg shadow-indigo-500/20"
-          >
-            <Mic className="w-4 h-4" />
-            Start Listening
-          </button>
+          {status === 'idle' && (
+            <button
+              onClick={onStartListening}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-emerald-500 text-white text-sm font-medium hover:opacity-90 transition-opacity shadow-lg shadow-indigo-500/20"
+            >
+              <Mic className="w-4 h-4" />
+              Start Listening
+            </button>
+          )}
         </div>
       )}
 
