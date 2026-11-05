@@ -14,7 +14,7 @@ export function useAudioPipeline({
   onAudioChunkReady,
   onSpeechActivityChange,
   chunkDurationMs = 4500,
-  silenceThreshold = 0.018,
+  silenceThreshold = 0.025,
 }: UseAudioPipelineOptions = {}) {
   const [isRecording, setIsRecording] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -89,9 +89,23 @@ export function useAudioPipeline({
       const totalLen = totalSamplesRef.current;
       const merged = new Float32Array(totalLen);
       let offset = 0;
+      let totalEnergy = 0;
       for (const buf of pcmBuffersRef.current) {
         merged.set(buf, offset);
         offset += buf.length;
+        for (let i = 0; i < buf.length; i++) {
+          totalEnergy += buf[i] * buf[i];
+        }
+      }
+
+      const chunkRms = Math.sqrt(totalEnergy / totalLen);
+      // Discard if the overall chunk is just low ambient room noise
+      if (chunkRms < silenceThresholdRef.current * 0.7 && !force) {
+        pcmBuffersRef.current = [];
+        preRollBuffersRef.current = [];
+        totalSamplesRef.current = 0;
+        hasVoiceInWindowRef.current = false;
+        return;
       }
 
       // Reset buffer immediately

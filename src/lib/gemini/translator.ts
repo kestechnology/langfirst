@@ -62,6 +62,63 @@ export async function translateAudioChunk({
 }
 
 /**
+ * Detects Whisper subtitle hallucinations, autoregressive repetition loops, and prompt regurgitations.
+ */
+function isWhisperHallucination(text: string): boolean {
+  if (!text || text.trim().length < 2) return true;
+  const cleaned = text
+    .toLowerCase()
+    .replace(/[.,\/#!$%\^&\*;:{}=\-_'\"\`~()]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // 1. Known Whisper subtitle / YouTube dataset hallucination strings
+  const HALLUCINATIONS = [
+    'thank you for watching',
+    'thanks for watching',
+    'thank you',
+    'thank you very much',
+    'subtitles by',
+    'please subscribe',
+    'subscribe to my channel',
+    'see you in the next video',
+    'see you next time',
+    'you',
+    'bye',
+    'goodbye',
+    'mbc',
+    'amara org',
+    'edo language and nigerian english',
+    'central edo language',
+    'esan language and nigerian english',
+    'watching',
+  ];
+
+  for (const h of HALLUCINATIONS) {
+    if (cleaned === h || cleaned.startsWith(h + ' ') || cleaned.endsWith(' ' + h)) {
+      return true;
+    }
+  }
+
+  // 2. Repetition loop detection (any n-gram repeating >= 3 times)
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  if (words.length >= 6) {
+    const ngrams: Record<string, number> = {};
+    for (let len = 1; len <= 3; len++) {
+      for (let i = 0; i <= words.length - len; i++) {
+        const gram = words.slice(i, i + len).join(' ');
+        ngrams[gram] = (ngrams[gram] || 0) + 1;
+        if (ngrams[gram] >= 3 && gram.length >= 3) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
  * Pipeline: OpenAI Whisper transcribes acoustic audio -> Claude (or GPT-4o-mini)
  * applies Esan linguistic dictionary and formats into structured English JSON.
  */
@@ -108,7 +165,7 @@ async function translateWithWhisperPipeline({
     formData.append('temperature', '0.0');
     formData.append(
       'prompt',
-      "Central Edo (Esan) language and Nigerian English: Ọb'okhian, vbọ khian, vbe oye he, erọlọ, ọya waigbe, ẹkpafọ kẹina, kọkọ, alẹkhe, no wahala, we dey, wetin dey happen, how body, I dey fine well well, na so."
+      "Ọb'okhian, vbe oye he? Ọya waigbe, erọlọ, ẹkpafọ kẹina, kọkọ, alẹkhe. How body? No wahala, we dey alright, I dey fine well well, na so."
     );
 
     const whisperRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
@@ -129,22 +186,9 @@ async function translateWithWhisperPipeline({
     const whisperData = await whisperRes.json();
     const rawTranscript = whisperData.text?.trim() || '';
 
-    // Ignore known Whisper silence hallucinations
-    const SILENCE_WORDS = new Set([
-      'you',
-      'thank you',
-      'thank you.',
-      'thank you very much.',
-      'subtitles by',
-      'thanks for watching',
-      'mbc',
-      'amara.org',
-      'bye',
-      'goodbye',
-    ]);
-
-    const normalized = rawTranscript.toLowerCase().replace(/[.,!?;:]/g, '').trim();
-    if (!rawTranscript || rawTranscript.length < 2 || SILENCE_WORDS.has(normalized)) {
+    // Filter out Whisper subtitle hallucinations, repetition loops, and prompt leaks
+    if (isWhisperHallucination(rawTranscript)) {
+      console.log(`[Whisper] Filtered acoustic hallucination: "${rawTranscript}"`);
       return {
         speaker,
         detected_lang: 'None',
@@ -322,7 +366,7 @@ async function refineWithClaude({
       },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 300,
+        max_tokens: 1000,
         system: ESAN_TRANSLATION_SYSTEM_PROMPT,
         messages: [{ role: 'user', content: userMessage }],
       }),
