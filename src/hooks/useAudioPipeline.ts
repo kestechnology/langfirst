@@ -1,19 +1,20 @@
 'use client';
 
 import { useState, useRef, useCallback, useEffect } from 'react';
+import { downsampleTo16k, encodeWAV } from '@/lib/audio/wavEncoder';
 
 export interface UseAudioPipelineOptions {
   onAudioChunkReady?: (blob: Blob, durationMs: number) => void;
   onSpeechActivityChange?: (isSpeaking: boolean) => void;
-  chunkDurationMs?: number; // dispatch rolling speech slices every ~2200ms
+  chunkDurationMs?: number; // max speech slice window (e.g. 2400ms)
   silenceThreshold?: number; // RMS volume threshold for speech detection
 }
 
 export function useAudioPipeline({
   onAudioChunkReady,
   onSpeechActivityChange,
-  chunkDurationMs = 2200,
-  silenceThreshold = 0.025,
+  chunkDurationMs = 2400,
+  silenceThreshold = 0.02,
 }: UseAudioPipelineOptions = {}) {
   const [isRecording, setIsRecording] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -22,20 +23,84 @@ export function useAudioPipeline({
   const [error, setError] = useState<string | null>(null);
 
   const streamRef = useRef<MediaStream | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const muteGainRef = useRef<GainNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
+  const flushIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
+  // PCM collection & VAD state refs
+  const pcmBuffersRef = useRef<Float32Array[]>([]);
+  const totalSamplesRef = useRef<number>(0);
+  const hasVoiceInWindowRef = useRef<boolean>(false);
   const isSpeakingStateRef = useRef<boolean>(false);
-  const lastSpeechTimeRef = useRef<number>(0);
-  const chunkStartTimeRef = useRef<number>(0);
+  const lastVoiceTimeRef = useRef<number>(0);
 
   const clearError = useCallback(() => {
     setError(null);
   }, []);
 
-  // Real-time visual level monitoring
+  // Flush accumulated PCM buffer to WAV chunk
+  const flushChunk = useCallback(
+    (force = false) => {
+      const audioCtx = audioContextRef.current;
+      if (!audioCtx || totalSamplesRef.current === 0) return;
+
+      const sampleRate = audioCtx.sampleRate;
+      const currentDurationMs = (totalSamplesRef.current / sampleRate) * 1000;
+      const now = Date.now();
+
+      // Trigger criteria:
+      // 1. Force flush (e.g. mic stop)
+      // 2. Rolling window reached chunkDurationMs (e.g. 2400ms)
+      // 3. Natural speech pause: voice was detected, speaker paused > 600ms, and we have >= 700ms audio
+      const isIntervalReached = currentDurationMs >= chunkDurationMs;
+      const isNaturalPause =
+        hasVoiceInWindowRef.current &&
+        !isSpeakingStateRef.current &&
+        now - lastVoiceTimeRef.current > 600 &&
+        currentDurationMs >= 700;
+
+      if (!force && !isIntervalReached && !isNaturalPause) {
+        return;
+      }
+
+      // If speech was present in this window (or forced), package and emit WAV
+      if (hasVoiceInWindowRef.current || force) {
+        const totalLen = totalSamplesRef.current;
+        const merged = new Float32Array(totalLen);
+        let offset = 0;
+        for (const buf of pcmBuffersRef.current) {
+          merged.set(buf, offset);
+          offset += buf.length;
+        }
+
+        // Reset buffers
+        pcmBuffersRef.current = [];
+        totalSamplesRef.current = 0;
+        hasVoiceInWindowRef.current = false;
+
+        // Downsample to 16,000Hz mono
+        const downsampled = downsampleTo16k(merged, sampleRate);
+        // Encode into standard RFC 2361 RIFF WAV container
+        const wavBlob = encodeWAV(downsampled, 16000);
+        const emittedDuration = Math.round((downsampled.length / 16000) * 1000);
+
+        console.log(`[AudioPipeline] Emitting 16kHz WAV slice: ${wavBlob.size} bytes (${emittedDuration}ms)`);
+        onAudioChunkReady?.(wavBlob, emittedDuration);
+      } else {
+        // Pure silence window: silently discard to prevent sending silence to Whisper
+        pcmBuffersRef.current = [];
+        totalSamplesRef.current = 0;
+        hasVoiceInWindowRef.current = false;
+      }
+    },
+    [chunkDurationMs, onAudioChunkReady]
+  );
+
+  // Real-time visual level monitoring loop
   const monitorVolume = useCallback(() => {
     if (!analyserRef.current) return;
 
@@ -54,14 +119,15 @@ export function useAudioPipeline({
     const hasVoice = normalized > silenceThreshold;
 
     if (hasVoice) {
-      lastSpeechTimeRef.current = now;
+      lastVoiceTimeRef.current = now;
+      hasVoiceInWindowRef.current = true;
       if (!isSpeakingStateRef.current) {
         isSpeakingStateRef.current = true;
         setIsSpeaking(true);
         onSpeechActivityChange?.(true);
       }
     } else {
-      if (isSpeakingStateRef.current && now - lastSpeechTimeRef.current > 700) {
+      if (isSpeakingStateRef.current && now - lastVoiceTimeRef.current > 650) {
         isSpeakingStateRef.current = false;
         setIsSpeaking(false);
         onSpeechActivityChange?.(false);
@@ -74,7 +140,7 @@ export function useAudioPipeline({
   // Start recording
   const startRecording = useCallback(async () => {
     try {
-      console.log('[AudioPipeline] Initiating microphone capture...');
+      console.log('[AudioPipeline] Requesting microphone access...');
       setIsConnecting(true);
       setError(null);
 
@@ -93,67 +159,82 @@ export function useAudioPipeline({
           },
         });
       } catch (err) {
-        console.warn('[AudioPipeline] Complex constraints failed, using basic audio: true', err);
+        console.warn('[AudioPipeline] Preferred audio constraints failed, falling back to audio: true', err);
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       }
 
       streamRef.current = stream;
-      console.log('[AudioPipeline] Microphone granted. Tracks:', stream.getAudioTracks().length);
+      console.log('[AudioPipeline] Microphone granted. Active tracks:', stream.getAudioTracks().length);
 
-      // Safe MediaRecorder configuration
-      let mimeType = 'audio/webm;codecs=opus';
-      if (typeof MediaRecorder !== 'undefined') {
-        const preferredTypes = [
-          'audio/webm;codecs=opus',
-          'audio/webm',
-          'audio/mp4',
-          'audio/ogg',
-        ];
-        mimeType = preferredTypes.find((t) => MediaRecorder.isTypeSupported(t)) || '';
+      // Create Web Audio context for PCM sampling and visual metering
+      const AudioContextClass =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+
+      if (!AudioContextClass) {
+        throw new Error('Web Audio API is not supported in this browser.');
       }
 
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-      mediaRecorderRef.current = recorder;
-      chunkStartTimeRef.current = Date.now();
+      const audioCtx = new AudioContextClass();
+      audioContextRef.current = audioCtx;
 
-      recorder.ondataavailable = (event) => {
-        if (event.data && event.data.size > 200) {
-          const duration = Date.now() - chunkStartTimeRef.current;
-          chunkStartTimeRef.current = Date.now();
-          console.log(`[AudioPipeline] Emitting slice: ${event.data.size} bytes (${duration}ms)`);
-          onAudioChunkReady?.(event.data, duration);
-        }
+      if (audioCtx.state === 'suspended') {
+        await audioCtx.resume();
+      }
+
+      const source = audioCtx.createMediaStreamSource(stream);
+      sourceRef.current = source;
+
+      // Analyser for visual volume meter
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.4;
+      source.connect(analyser);
+      analyserRef.current = analyser;
+
+      // ScriptProcessorNode for lossless continuous PCM buffering
+      const bufferSize = 4096;
+      const processor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+      processorRef.current = processor;
+
+      // Route audio to muted gain node to prevent speaker feedback while keeping processor active
+      const muteGain = audioCtx.createGain();
+      muteGain.gain.value = 0;
+      muteGainRef.current = muteGain;
+
+      processor.onaudioprocess = (e: AudioProcessingEvent) => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        // Create an independent copy of PCM samples
+        const copy = new Float32Array(inputData.length);
+        copy.set(inputData);
+        pcmBuffersRef.current.push(copy);
+        totalSamplesRef.current += copy.length;
       };
 
-      // Emit slices at interval
-      recorder.start(chunkDurationMs);
+      source.connect(processor);
+      processor.connect(muteGain);
+      muteGain.connect(audioCtx.destination);
 
-      // Non-blocking Web Audio Analyser for visual waveform meter
-      try {
-        const AudioContextClass =
-          window.AudioContext ||
-          (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-        if (AudioContextClass) {
-          const audioCtx = new AudioContextClass();
-          audioContextRef.current = audioCtx;
-          audioCtx.resume().catch(() => {});
+      // Reset buffers
+      pcmBuffersRef.current = [];
+      totalSamplesRef.current = 0;
+      hasVoiceInWindowRef.current = false;
+      isSpeakingStateRef.current = false;
 
-          const source = audioCtx.createMediaStreamSource(stream);
-          const analyser = audioCtx.createAnalyser();
-          analyser.fftSize = 256;
-          analyser.smoothingTimeConstant = 0.4;
-          source.connect(analyser);
-          analyserRef.current = analyser;
+      // Start volume monitor loop
+      monitorVolume();
 
-          monitorVolume();
-        }
-      } catch (audioCtxErr) {
-        console.warn('[AudioPipeline] Visualizer init warning (non-fatal):', audioCtxErr);
+      // Check chunk flush criteria periodically (every 100ms)
+      if (flushIntervalRef.current) {
+        clearInterval(flushIntervalRef.current);
       }
+      flushIntervalRef.current = setInterval(() => {
+        flushChunk(false);
+      }, 100);
 
       setIsRecording(true);
       setIsConnecting(false);
-      console.log('[AudioPipeline] Successfully recording.');
+      console.log(`[AudioPipeline] Live recording active @ ${audioCtx.sampleRate}Hz.`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Microphone access failed.';
       console.error('[AudioPipeline] Microphone error:', err);
@@ -161,25 +242,65 @@ export function useAudioPipeline({
       setIsRecording(false);
       setIsConnecting(false);
     }
-  }, [chunkDurationMs, monitorVolume, onAudioChunkReady]);
+  }, [flushChunk, monitorVolume]);
 
   // Stop recording
   const stopRecording = useCallback(() => {
     console.log('[AudioPipeline] Stopping audio capture...');
     setIsConnecting(false);
 
+    if (flushIntervalRef.current) {
+      clearInterval(flushIntervalRef.current);
+      flushIntervalRef.current = null;
+    }
+
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
     }
 
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+    // Flush any remaining buffered speech
+    try {
+      flushChunk(true);
+    } catch {
+      // ignore
+    }
+
+    // Disconnect Web Audio nodes
+    if (processorRef.current) {
       try {
-        mediaRecorderRef.current.stop();
+        processorRef.current.disconnect();
       } catch {
         // ignore
       }
-      mediaRecorderRef.current = null;
+      processorRef.current = null;
+    }
+
+    if (sourceRef.current) {
+      try {
+        sourceRef.current.disconnect();
+      } catch {
+        // ignore
+      }
+      sourceRef.current = null;
+    }
+
+    if (analyserRef.current) {
+      try {
+        analyserRef.current.disconnect();
+      } catch {
+        // ignore
+      }
+      analyserRef.current = null;
+    }
+
+    if (muteGainRef.current) {
+      try {
+        muteGainRef.current.disconnect();
+      } catch {
+        // ignore
+      }
+      muteGainRef.current = null;
     }
 
     if (streamRef.current) {
@@ -192,11 +313,15 @@ export function useAudioPipeline({
       audioContextRef.current = null;
     }
 
+    pcmBuffersRef.current = [];
+    totalSamplesRef.current = 0;
+    hasVoiceInWindowRef.current = false;
+    isSpeakingStateRef.current = false;
+
     setIsRecording(false);
     setIsSpeaking(false);
     setAudioLevel(0);
-    isSpeakingStateRef.current = false;
-  }, []);
+  }, [flushChunk]);
 
   useEffect(() => {
     return () => {

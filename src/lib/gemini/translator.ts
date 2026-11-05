@@ -88,7 +88,7 @@ async function translateWithWhisperPipeline({
       bytes[i] = binary.charCodeAt(i);
     }
 
-    const cleanMime = mimeType ? mimeType.split(';')[0].trim() : 'audio/webm';
+    const cleanMime = mimeType ? mimeType.split(';')[0].trim() : 'audio/wav';
     const ext = cleanMime.includes('webm')
       ? 'webm'
       : cleanMime.includes('mp4') || cleanMime.includes('m4a')
@@ -124,8 +124,22 @@ async function translateWithWhisperPipeline({
     const whisperData = await whisperRes.json();
     const rawTranscript = whisperData.text?.trim() || '';
 
-    // If completely silent or empty text, return early
-    if (!rawTranscript || rawTranscript.length < 2) {
+    // Ignore known Whisper silence hallucinations
+    const SILENCE_WORDS = new Set([
+      'you',
+      'thank you',
+      'thank you.',
+      'thank you very much.',
+      'subtitles by',
+      'thanks for watching',
+      'mbc',
+      'amara.org',
+      'bye',
+      'goodbye',
+    ]);
+
+    const normalized = rawTranscript.toLowerCase().replace(/[.,!?;:]/g, '').trim();
+    if (!rawTranscript || rawTranscript.length < 2 || SILENCE_WORDS.has(normalized)) {
       return {
         speaker,
         detected_lang: 'None',
@@ -157,7 +171,7 @@ async function translateWithWhisperPipeline({
       speaker,
       detected_lang: 'Error',
       transcription: '',
-      translation: `Audio processing error: ${msg}`,
+      translation: '',
       is_final: true,
       error: msg,
     };
@@ -342,9 +356,9 @@ async function translateWithWhisperDirect({
       speaker,
       detected_lang: 'Error',
       transcription: '',
-      translation: `Whisper error: ${errText}`,
+      translation: '',
       is_final: true,
-      error: errText,
+      error: `Whisper error: ${errText}`,
     };
   }
 

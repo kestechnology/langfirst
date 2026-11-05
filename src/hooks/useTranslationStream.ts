@@ -55,8 +55,8 @@ export function useTranslationStream({
         id: interimId,
         speaker: 'Speaker A',
         detected_lang: 'Analyzing...',
-        transcription: 'Processing audio slice...',
-        translation: 'Translating with Gemini 2.0 Flash...',
+        transcription: 'Listening to speech...',
+        translation: 'Translating in real-time...',
         is_final: false,
         timestamp: Date.now(),
       };
@@ -107,9 +107,12 @@ export function useTranslationStream({
                 if (payload.error) {
                   setSessionError(payload.error);
                   onError?.(payload.error);
+                  setInterimMessage(null);
+                  onInterimUpdate?.(null);
+                  continue;
                 }
 
-                if (payload.translation) {
+                if (payload.translation && payload.translation.trim().length > 0) {
                   const latency = Date.now() - startTime;
                   setLatestLatencyMs(latency);
 
@@ -136,6 +139,10 @@ export function useTranslationStream({
                   // Append to message list
                   setMessages((prev) => [...prev, newMessage]);
                   onNewMessage?.(newMessage);
+                } else if (payload.is_final) {
+                  // Silent or empty translation: clear interim indicator
+                  setInterimMessage(null);
+                  onInterimUpdate?.(null);
                 }
               } catch (parseErr) {
                 console.warn('[SSE] Chunk parse warning:', parseErr);
