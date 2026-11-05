@@ -85,7 +85,7 @@ export function DialogueStream({
               ? 'Speak in Esan or Nigerian English. Translations will appear here in real time.'
               : 'Tap the microphone below to start real-time bilingual translation.'}
           </p>
-          {status === 'idle' && (
+          {(status === 'idle' || status === 'error') && (
             <button
               type="button"
               onClick={(e) => {
@@ -95,8 +95,15 @@ export function DialogueStream({
               className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-emerald-500 text-white text-sm font-medium hover:opacity-90 transition-opacity shadow-lg shadow-indigo-500/20 cursor-pointer"
             >
               <Mic className="w-4 h-4" />
-              Start Listening
+              {status === 'error' ? 'Retry Microphone' : 'Start Listening'}
             </button>
+          )}
+
+          {status === 'connecting' && (
+            <div className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-neutral-900 border border-neutral-800 text-neutral-300 text-sm font-medium">
+              <Sparkles className="w-4 h-4 animate-spin text-amber-400" />
+              Connecting to microphone...
+            </div>
           )}
         </div>
       )}

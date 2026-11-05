@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Header } from '@/components/Header';
 import { DialogueStream } from '@/components/DialogueStream';
 import { AudioControlBar } from '@/components/AudioControlBar';
@@ -11,10 +11,8 @@ import { TranslationMessage, PipelineStatus } from '@/types/translation';
 import { useAudioPipeline } from '@/hooks/useAudioPipeline';
 import { useTranslationStream } from '@/hooks/useTranslationStream';
 import { saveSession } from '@/lib/storage/transcriptStorage';
-import { AlertTriangle } from 'lucide-react';
 
 export default function Home() {
-  const [activeStatus, setActiveStatus] = useState<PipelineStatus>('idle');
   const [isBilingual, setIsBilingual] = useState<boolean>(true);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
@@ -38,16 +36,12 @@ export default function Home() {
     clearMessages,
     setManualMessages,
   } = useTranslationStream({
-    onStatusChange: (newStatus) => {
-      setActiveStatus(newStatus);
-    },
     onNewMessage: (newMsg) => {
-      // Auto-save session to local storage when new message arrives
       saveSession([...messages, newMsg]);
     },
   });
 
-  // Audio Pipeline for live Web Audio capture, 16kHz WAV rolling slicing & volume metering
+  // Audio Pipeline for live Web Audio capture, rolling slicing & volume metering
   const {
     isRecording,
     isConnecting,
@@ -59,26 +53,16 @@ export default function Home() {
     stopRecording,
   } = useAudioPipeline({
     onAudioChunkReady: (chunkBlob, durationMs) => {
-      // Audio slice captured: dispatch to translation engine
       console.log(`[AudioPipeline] Captured speech slice: ${chunkBlob.size} bytes (${durationMs}ms)`);
       processAudioSlice(chunkBlob, durationMs, true);
-    },
-    onSpeechActivityChange: (speaking) => {
-      if (speaking) {
-        setActiveStatus('speech_detected');
-      } else {
-        setActiveStatus('listening');
-      }
     },
     chunkDurationMs: 2200,
   });
 
   const handleToggleMic = async () => {
-    if (isRecording) {
+    if (isRecording || isConnecting) {
       stopRecording();
-      setActiveStatus('idle');
     } else {
-      setActiveStatus('connecting');
       clearError();
       await startRecording();
     }
@@ -121,17 +105,17 @@ export default function Home() {
     }
   };
 
-  // Derive unified pipeline status
+  // Derive unified pipeline status directly from actual live states
   const currentStatus: PipelineStatus = (audioError || sessionError)
     ? 'error'
-    : isConnecting || (activeStatus === 'connecting' && !isRecording)
-    ? 'connecting'
     : isTranslating
     ? 'analyzing'
     : isSpeaking
     ? 'speech_detected'
     : isRecording
     ? 'listening'
+    : isConnecting
+    ? 'connecting'
     : 'idle';
 
   return (

@@ -82,30 +82,34 @@ export function useAudioPipeline({
         throw new Error('Microphone access is not supported in this browser.');
       }
 
-      // Universal audio capture constraints
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
+      // Universal audio capture constraints with fallback
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+      } catch (err) {
+        console.warn('[AudioPipeline] Complex constraints failed, using basic audio: true', err);
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
 
       streamRef.current = stream;
-      console.log('[AudioPipeline] Microphone permission granted.');
+      console.log('[AudioPipeline] Microphone granted. Tracks:', stream.getAudioTracks().length);
 
-      // Initialize HTML5 MediaRecorder (universal C++ audio compression)
+      // Safe MediaRecorder configuration
       let mimeType = 'audio/webm;codecs=opus';
       if (typeof MediaRecorder !== 'undefined') {
-        if (!MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-          if (MediaRecorder.isTypeSupported('audio/webm')) {
-            mimeType = 'audio/webm';
-          } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-            mimeType = 'audio/mp4';
-          } else {
-            mimeType = '';
-          }
-        }
+        const preferredTypes = [
+          'audio/webm;codecs=opus',
+          'audio/webm',
+          'audio/mp4',
+          'audio/ogg',
+        ];
+        mimeType = preferredTypes.find((t) => MediaRecorder.isTypeSupported(t)) || '';
       }
 
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
@@ -129,19 +133,20 @@ export function useAudioPipeline({
         const AudioContextClass =
           window.AudioContext ||
           (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-        const audioCtx = new AudioContextClass();
-        audioContextRef.current = audioCtx;
-        // Do not await resume() to prevent any browser autoplay policy hangs
-        audioCtx.resume().catch(() => {});
+        if (AudioContextClass) {
+          const audioCtx = new AudioContextClass();
+          audioContextRef.current = audioCtx;
+          audioCtx.resume().catch(() => {});
 
-        const source = audioCtx.createMediaStreamSource(stream);
-        const analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 256;
-        analyser.smoothingTimeConstant = 0.4;
-        source.connect(analyser);
-        analyserRef.current = analyser;
+          const source = audioCtx.createMediaStreamSource(stream);
+          const analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 256;
+          analyser.smoothingTimeConstant = 0.4;
+          source.connect(analyser);
+          analyserRef.current = analyser;
 
-        monitorVolume();
+          monitorVolume();
+        }
       } catch (audioCtxErr) {
         console.warn('[AudioPipeline] Visualizer init warning (non-fatal):', audioCtxErr);
       }
@@ -155,7 +160,6 @@ export function useAudioPipeline({
       setError(msg);
       setIsRecording(false);
       setIsConnecting(false);
-      throw err;
     }
   }, [chunkDurationMs, monitorVolume, onAudioChunkReady]);
 
