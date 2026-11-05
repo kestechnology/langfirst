@@ -95,3 +95,4 @@ export function downloadTxt(messages: TranslationMessage[], isBilingual: boolean
   const content = generateTxtContent(messages, isBilingual);
   triggerDownload(content, `langfirst-transcript-${Date.now()}.txt`, 'text/plain;charset=utf-8');
 }
+
