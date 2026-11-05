@@ -22,6 +22,7 @@ export function useVadPipeline({
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isFallbackMode, setIsFallbackMode] = useState(false);
 
   const vadInstanceRef = useRef<{
     start: () => Promise<void>;
@@ -89,8 +90,8 @@ export function useVadPipeline({
         minSpeechMs: 200,
         preSpeechPadMs: 300, // 300ms lookback buffer to preserve initial consonants
         redemptionMs: 250,
-        baseAssetPath: '/vad',
-        onnxWASMBasePath: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/',
+        baseAssetPath: '/vad/',
+        onnxWASMBasePath: '/vad/',
         onSpeechStart: () => {
           setIsSpeaking(true);
           accumulatedSamplesRef.current = [];
@@ -137,8 +138,10 @@ export function useVadPipeline({
       await vad.start();
       setIsVadActive(true);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to initialize Silero VAD.';
-      setError(msg);
+      const msg = err instanceof Error ? err.message : 'Silero VAD WASM initialization failed.';
+      console.warn('[VAD] Switching seamlessly to Web Audio energy fallback detector:', msg);
+      setIsFallbackMode(true);
+      setError(null); // do not show fatal error since fallback handles it
       setIsVadActive(false);
     } finally {
       setIsLoading(false);
@@ -174,6 +177,7 @@ export function useVadPipeline({
     isVadActive,
     isSpeaking,
     isLoading,
+    isFallbackMode,
     error,
     startVad,
     stopVad,

@@ -105,7 +105,16 @@ export default function Home() {
     lowVolumeWarning,
     startRecording,
     stopRecording,
-  } = useAudioPipeline();
+  } = useAudioPipeline({
+    onAudioChunkReady: (chunkBlob, durationMs) => {
+      // If Silero VAD is active, it handles speech slicing.
+      // If VAD is in fallback mode or inactive, Web Audio slices are streamed on speech activity!
+      if (!isVadActive && audioLevel > 0.03) {
+        processAudioSlice(chunkBlob, durationMs, true);
+      }
+    },
+    chunkIntervalMs: 2200,
+  });
 
   const handleToggleMic = async () => {
     if (isRecording || isVadActive) {
