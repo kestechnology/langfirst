@@ -42,6 +42,14 @@ export default function Home() {
   });
 
   // Audio Pipeline for live Web Audio capture, rolling slicing & volume metering
+  const handleAudioChunkReady = React.useCallback(
+    (chunkBlob: Blob, durationMs: number) => {
+      console.log(`[AudioPipeline] Captured speech slice: ${chunkBlob.size} bytes (${durationMs}ms)`);
+      processAudioSlice(chunkBlob, durationMs, true);
+    },
+    [processAudioSlice]
+  );
+
   const {
     isRecording,
     isConnecting,
@@ -52,21 +60,18 @@ export default function Home() {
     startRecording,
     stopRecording,
   } = useAudioPipeline({
-    onAudioChunkReady: (chunkBlob, durationMs) => {
-      console.log(`[AudioPipeline] Captured speech slice: ${chunkBlob.size} bytes (${durationMs}ms)`);
-      processAudioSlice(chunkBlob, durationMs, true);
-    },
-    chunkDurationMs: 2200,
+    onAudioChunkReady: handleAudioChunkReady,
+    chunkDurationMs: 2400,
   });
 
-  const handleToggleMic = async () => {
-    if (isRecording || isConnecting) {
+  const handleToggleMic = React.useCallback(async () => {
+    if (isRecording) {
       stopRecording();
     } else {
       clearError();
       await startRecording();
     }
-  };
+  }, [clearError, isRecording, startRecording, stopRecording]);
 
   const handleClear = () => {
     clearMessages();

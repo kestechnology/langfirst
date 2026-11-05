@@ -22,6 +22,22 @@ export function useAudioPipeline({
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Store options in stable refs to avoid recreating callbacks or triggering unmount effects
+  const onAudioChunkReadyRef = useRef(onAudioChunkReady);
+  onAudioChunkReadyRef.current = onAudioChunkReady;
+
+  const onSpeechActivityChangeRef = useRef(onSpeechActivityChange);
+  onSpeechActivityChangeRef.current = onSpeechActivityChange;
+
+  const chunkDurationMsRef = useRef(chunkDurationMs);
+  chunkDurationMsRef.current = chunkDurationMs;
+
+  const silenceThresholdRef = useRef(silenceThreshold);
+  silenceThresholdRef.current = silenceThreshold;
+
+  const isRecordingRef = useRef(false);
+  isRecordingRef.current = isRecording;
+
   const streamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
@@ -42,63 +58,57 @@ export function useAudioPipeline({
     setError(null);
   }, []);
 
-  // Flush accumulated PCM buffer to WAV chunk
-  const flushChunk = useCallback(
-    (force = false) => {
-      const audioCtx = audioContextRef.current;
-      if (!audioCtx || totalSamplesRef.current === 0) return;
+  // Flush accumulated PCM buffer to standard 16kHz RIFF WAV chunk
+  const flushChunk = useCallback((force = false) => {
+    const audioCtx = audioContextRef.current;
+    if (!audioCtx || totalSamplesRef.current === 0) return;
 
-      const sampleRate = audioCtx.sampleRate;
-      const currentDurationMs = (totalSamplesRef.current / sampleRate) * 1000;
-      const now = Date.now();
+    const sampleRate = audioCtx.sampleRate;
+    const currentDurationMs = (totalSamplesRef.current / sampleRate) * 1000;
+    const now = Date.now();
 
-      // Trigger criteria:
-      // 1. Force flush (e.g. mic stop)
-      // 2. Rolling window reached chunkDurationMs (e.g. 2400ms)
-      // 3. Natural speech pause: voice was detected, speaker paused > 600ms, and we have >= 700ms audio
-      const isIntervalReached = currentDurationMs >= chunkDurationMs;
-      const isNaturalPause =
-        hasVoiceInWindowRef.current &&
-        !isSpeakingStateRef.current &&
-        now - lastVoiceTimeRef.current > 600 &&
-        currentDurationMs >= 700;
+    const maxDuration = chunkDurationMsRef.current;
+    const isIntervalReached = currentDurationMs >= maxDuration;
+    const isNaturalPause =
+      hasVoiceInWindowRef.current &&
+      !isSpeakingStateRef.current &&
+      now - lastVoiceTimeRef.current > 600 &&
+      currentDurationMs >= 700;
 
-      if (!force && !isIntervalReached && !isNaturalPause) {
-        return;
+    if (!force && !isIntervalReached && !isNaturalPause) {
+      return;
+    }
+
+    // If speech was present in this window (or forced flush), package and emit WAV
+    if (hasVoiceInWindowRef.current || force) {
+      const totalLen = totalSamplesRef.current;
+      const merged = new Float32Array(totalLen);
+      let offset = 0;
+      for (const buf of pcmBuffersRef.current) {
+        merged.set(buf, offset);
+        offset += buf.length;
       }
 
-      // If speech was present in this window (or forced), package and emit WAV
-      if (hasVoiceInWindowRef.current || force) {
-        const totalLen = totalSamplesRef.current;
-        const merged = new Float32Array(totalLen);
-        let offset = 0;
-        for (const buf of pcmBuffersRef.current) {
-          merged.set(buf, offset);
-          offset += buf.length;
-        }
+      // Reset buffer immediately
+      pcmBuffersRef.current = [];
+      totalSamplesRef.current = 0;
+      hasVoiceInWindowRef.current = false;
 
-        // Reset buffers
-        pcmBuffersRef.current = [];
-        totalSamplesRef.current = 0;
-        hasVoiceInWindowRef.current = false;
+      // Downsample to 16,000Hz mono
+      const downsampled = downsampleTo16k(merged, sampleRate);
+      // Encode into standard RFC 2361 RIFF WAV container
+      const wavBlob = encodeWAV(downsampled, 16000);
+      const emittedDuration = Math.round((downsampled.length / 16000) * 1000);
 
-        // Downsample to 16,000Hz mono
-        const downsampled = downsampleTo16k(merged, sampleRate);
-        // Encode into standard RFC 2361 RIFF WAV container
-        const wavBlob = encodeWAV(downsampled, 16000);
-        const emittedDuration = Math.round((downsampled.length / 16000) * 1000);
-
-        console.log(`[AudioPipeline] Emitting 16kHz WAV slice: ${wavBlob.size} bytes (${emittedDuration}ms)`);
-        onAudioChunkReady?.(wavBlob, emittedDuration);
-      } else {
-        // Pure silence window: silently discard to prevent sending silence to Whisper
-        pcmBuffersRef.current = [];
-        totalSamplesRef.current = 0;
-        hasVoiceInWindowRef.current = false;
-      }
-    },
-    [chunkDurationMs, onAudioChunkReady]
-  );
+      console.log(`[AudioPipeline] Emitting 16kHz WAV slice: ${wavBlob.size} bytes (${emittedDuration}ms)`);
+      onAudioChunkReadyRef.current?.(wavBlob, emittedDuration);
+    } else {
+      // Pure silence: silently discard to prevent sending silence to Whisper
+      pcmBuffersRef.current = [];
+      totalSamplesRef.current = 0;
+      hasVoiceInWindowRef.current = false;
+    }
+  }, []);
 
   // Real-time visual level monitoring loop
   const monitorVolume = useCallback(() => {
@@ -116,7 +126,8 @@ export function useAudioPipeline({
     setAudioLevel(normalized);
 
     const now = Date.now();
-    const hasVoice = normalized > silenceThreshold;
+    const threshold = silenceThresholdRef.current;
+    const hasVoice = normalized > threshold;
 
     if (hasVoice) {
       lastVoiceTimeRef.current = now;
@@ -124,125 +135,18 @@ export function useAudioPipeline({
       if (!isSpeakingStateRef.current) {
         isSpeakingStateRef.current = true;
         setIsSpeaking(true);
-        onSpeechActivityChange?.(true);
+        onSpeechActivityChangeRef.current?.(true);
       }
     } else {
       if (isSpeakingStateRef.current && now - lastVoiceTimeRef.current > 650) {
         isSpeakingStateRef.current = false;
         setIsSpeaking(false);
-        onSpeechActivityChange?.(false);
+        onSpeechActivityChangeRef.current?.(false);
       }
     }
 
     animationFrameRef.current = requestAnimationFrame(monitorVolume);
-  }, [onSpeechActivityChange, silenceThreshold]);
-
-  // Start recording
-  const startRecording = useCallback(async () => {
-    try {
-      console.log('[AudioPipeline] Requesting microphone access...');
-      setIsConnecting(true);
-      setError(null);
-
-      if (!navigator?.mediaDevices?.getUserMedia) {
-        throw new Error('Microphone access is not supported in this browser.');
-      }
-
-      // Universal audio capture constraints with fallback
-      let stream: MediaStream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-        });
-      } catch (err) {
-        console.warn('[AudioPipeline] Preferred audio constraints failed, falling back to audio: true', err);
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      }
-
-      streamRef.current = stream;
-      console.log('[AudioPipeline] Microphone granted. Active tracks:', stream.getAudioTracks().length);
-
-      // Create Web Audio context for PCM sampling and visual metering
-      const AudioContextClass =
-        window.AudioContext ||
-        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-
-      if (!AudioContextClass) {
-        throw new Error('Web Audio API is not supported in this browser.');
-      }
-
-      const audioCtx = new AudioContextClass();
-      audioContextRef.current = audioCtx;
-
-      if (audioCtx.state === 'suspended') {
-        await audioCtx.resume();
-      }
-
-      const source = audioCtx.createMediaStreamSource(stream);
-      sourceRef.current = source;
-
-      // Analyser for visual volume meter
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 256;
-      analyser.smoothingTimeConstant = 0.4;
-      source.connect(analyser);
-      analyserRef.current = analyser;
-
-      // ScriptProcessorNode for lossless continuous PCM buffering
-      const bufferSize = 4096;
-      const processor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
-      processorRef.current = processor;
-
-      // Route audio to muted gain node to prevent speaker feedback while keeping processor active
-      const muteGain = audioCtx.createGain();
-      muteGain.gain.value = 0;
-      muteGainRef.current = muteGain;
-
-      processor.onaudioprocess = (e: AudioProcessingEvent) => {
-        const inputData = e.inputBuffer.getChannelData(0);
-        // Create an independent copy of PCM samples
-        const copy = new Float32Array(inputData.length);
-        copy.set(inputData);
-        pcmBuffersRef.current.push(copy);
-        totalSamplesRef.current += copy.length;
-      };
-
-      source.connect(processor);
-      processor.connect(muteGain);
-      muteGain.connect(audioCtx.destination);
-
-      // Reset buffers
-      pcmBuffersRef.current = [];
-      totalSamplesRef.current = 0;
-      hasVoiceInWindowRef.current = false;
-      isSpeakingStateRef.current = false;
-
-      // Start volume monitor loop
-      monitorVolume();
-
-      // Check chunk flush criteria periodically (every 100ms)
-      if (flushIntervalRef.current) {
-        clearInterval(flushIntervalRef.current);
-      }
-      flushIntervalRef.current = setInterval(() => {
-        flushChunk(false);
-      }, 100);
-
-      setIsRecording(true);
-      setIsConnecting(false);
-      console.log(`[AudioPipeline] Live recording active @ ${audioCtx.sampleRate}Hz.`);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Microphone access failed.';
-      console.error('[AudioPipeline] Microphone error:', err);
-      setError(msg);
-      setIsRecording(false);
-      setIsConnecting(false);
-    }
-  }, [flushChunk, monitorVolume]);
+  }, []);
 
   // Stop recording
   const stopRecording = useCallback(() => {
@@ -323,11 +227,122 @@ export function useAudioPipeline({
     setAudioLevel(0);
   }, [flushChunk]);
 
+  // Keep stopRecording ref for unmount cleanup
+  const stopRecordingRef = useRef(stopRecording);
+  stopRecordingRef.current = stopRecording;
+
+  // Start recording
+  const startRecording = useCallback(async () => {
+    try {
+      console.log('[AudioPipeline] Requesting microphone access...');
+      setIsConnecting(true);
+      setError(null);
+
+      if (!navigator?.mediaDevices?.getUserMedia) {
+        throw new Error('Microphone access is not supported in this browser.');
+      }
+
+      // Universal audio capture constraints with fallback
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+      } catch (err) {
+        console.warn('[AudioPipeline] Preferred audio constraints failed, falling back to audio: true', err);
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
+
+      streamRef.current = stream;
+      console.log('[AudioPipeline] Microphone granted. Active tracks:', stream.getAudioTracks().length);
+
+      // Create Web Audio context for PCM sampling and visual metering
+      const AudioContextClass =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+
+      if (!AudioContextClass) {
+        throw new Error('Web Audio API is not supported in this browser.');
+      }
+
+      const audioCtx = new AudioContextClass();
+      audioContextRef.current = audioCtx;
+
+      // DO NOT await audioCtx.resume()! Fire-and-forget so Chrome Autoplay Policy doesn't hang the call
+      audioCtx.resume().catch(() => {});
+
+      const source = audioCtx.createMediaStreamSource(stream);
+      sourceRef.current = source;
+
+      // Analyser for visual volume meter
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.4;
+      source.connect(analyser);
+      analyserRef.current = analyser;
+
+      // ScriptProcessorNode for lossless continuous PCM buffering
+      const bufferSize = 4096;
+      const processor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+      processorRef.current = processor;
+
+      // Route audio to muted gain node to prevent speaker feedback while keeping processor active
+      const muteGain = audioCtx.createGain();
+      muteGain.gain.value = 0;
+      muteGainRef.current = muteGain;
+
+      processor.onaudioprocess = (e: AudioProcessingEvent) => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        // Create an independent copy of PCM samples
+        const copy = new Float32Array(inputData.length);
+        copy.set(inputData);
+        pcmBuffersRef.current.push(copy);
+        totalSamplesRef.current += copy.length;
+      };
+
+      source.connect(processor);
+      processor.connect(muteGain);
+      muteGain.connect(audioCtx.destination);
+
+      // Reset buffers
+      pcmBuffersRef.current = [];
+      totalSamplesRef.current = 0;
+      hasVoiceInWindowRef.current = false;
+      isSpeakingStateRef.current = false;
+
+      // Start volume monitor loop
+      monitorVolume();
+
+      // Check chunk flush criteria periodically (every 100ms)
+      if (flushIntervalRef.current) {
+        clearInterval(flushIntervalRef.current);
+      }
+      flushIntervalRef.current = setInterval(() => {
+        flushChunk(false);
+      }, 100);
+
+      setIsRecording(true);
+      setIsConnecting(false);
+      console.log(`[AudioPipeline] Live recording active @ ${audioCtx.sampleRate}Hz.`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Microphone access failed.';
+      console.error('[AudioPipeline] Microphone error:', err);
+      setError(msg);
+      setIsRecording(false);
+      setIsConnecting(false);
+    }
+  }, [flushChunk, monitorVolume]);
+
+  // Cleanup on unmount only
   useEffect(() => {
     return () => {
-      stopRecording();
+      stopRecordingRef.current?.();
     };
-  }, [stopRecording]);
+  }, []);
 
   return {
     isRecording,
