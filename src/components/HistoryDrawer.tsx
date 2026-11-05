@@ -167,7 +167,9 @@ export function HistoryDrawer({
                   </button>
                 </div>
                 <div className="flex items-center justify-between text-[10px] text-neutral-500 font-mono">
-                  <span>{new Date(s.createdAt).toLocaleDateString()}</span>
+                  <span suppressHydrationWarning>
+                    {new Date(s.createdAt).toLocaleDateString()}
+                  </span>
                   <span>{s.messages.length} messages</span>
                 </div>
               </div>
@@ -178,4 +180,3 @@ export function HistoryDrawer({
     </div>
   );
 }
-

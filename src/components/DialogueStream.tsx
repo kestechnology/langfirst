@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { TranslationMessage, PipelineStatus } from '@/types/translation';
-import { Check, Copy, MessageSquare, Mic, Sparkles } from 'lucide-react';
+import { Check, Copy, Mic, Sparkles } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 interface DialogueStreamProps {
@@ -11,6 +11,26 @@ interface DialogueStreamProps {
   status: PipelineStatus;
   isBilingual: boolean;
   onStartListening: () => void;
+}
+
+function FormattedTime({ timestamp }: { timestamp: number }) {
+  const [formatted, setFormatted] = useState<string>('');
+
+  useEffect(() => {
+    setFormatted(
+      new Date(timestamp).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
+    );
+  }, [timestamp]);
+
+  return (
+    <span suppressHydrationWarning className="text-[11px] text-neutral-500 font-mono">
+      {formatted}
+    </span>
+  );
 }
 
 export function DialogueStream({
@@ -90,13 +110,7 @@ export function DialogueStream({
                   )}
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="text-[11px] text-neutral-500 font-mono">
-                    {new Date(msg.timestamp).toLocaleTimeString([], {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                      second: '2-digit',
-                    })}
-                  </span>
+                  <FormattedTime timestamp={msg.timestamp} />
                   <button
                     onClick={() => copyToClipboard(msg.translation, msg.id)}
                     className="opacity-0 group-hover:opacity-100 transition-opacity text-neutral-400 hover:text-white p-1 rounded"
@@ -163,4 +177,3 @@ export function DialogueStream({
     </div>
   );
 }
-

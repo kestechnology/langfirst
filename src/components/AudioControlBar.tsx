@@ -26,7 +26,7 @@ export function AudioControlBar({
         <div className="hidden sm:flex flex-col text-left">
           <span className="text-[11px] text-neutral-400 font-medium flex items-center gap-1.5">
             <Radio className="w-3.5 h-3.5 text-indigo-400" />
-            Vercel Edge + Gemini 2.0
+            Vercel + Whisper & Claude
           </span>
           <span className="text-[10px] text-neutral-500 font-mono">
             {latencyMs ? `Latency: ~${latencyMs}ms` : 'Target: <800ms'}

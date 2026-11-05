@@ -48,6 +48,11 @@ export default function Home() {
   const [isBilingual, setIsBilingual] = useState<boolean>(true);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [isMounted, setIsMounted] = useState(false);
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
 
   // Translation stream hook with retry and session rollover
   const {
