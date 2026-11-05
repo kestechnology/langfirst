@@ -1,12 +1,12 @@
 'use client';
 
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { encodeWAV } from '@/lib/audio/wavEncoder';
+import { encodeWAV, downsampleTo16k } from '@/lib/audio/wavEncoder';
 
 export interface UseAudioPipelineOptions {
   onAudioChunkReady?: (blob: Blob, durationMs: number) => void;
   onSpeechActivityChange?: (isSpeaking: boolean) => void;
-  chunkDurationMs?: number; // dispatch rolling speech slices every ~2000ms
+  chunkDurationMs?: number; // dispatch rolling speech slices every ~2200ms
   silenceThreshold?: number; // RMS volume threshold for speech detection
   silenceFlushDelayMs?: number; // ms of silence before flushing an utterance
 }
@@ -15,7 +15,7 @@ export function useAudioPipeline({
   onAudioChunkReady,
   onSpeechActivityChange,
   chunkDurationMs = 2200,
-  silenceThreshold = 0.025,
+  silenceThreshold = 0.02,
   silenceFlushDelayMs = 600,
 }: UseAudioPipelineOptions = {}) {
   const [isRecording, setIsRecording] = useState(false);
@@ -27,22 +27,23 @@ export function useAudioPipeline({
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const muteGainRef = useRef<GainNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
 
   // Audio sample buffer
   const sampleBufferRef = useRef<Float32Array[]>([]);
   const totalSamplesRef = useRef<number>(0);
   const lastSpeechTimeRef = useRef<number>(0);
-  const sliceStartTimeRef = useRef<number>(0);
   const isSpeakingStateRef = useRef<boolean>(false);
   const flushTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Helper to flush current buffer into a 16kHz WAV blob
+  // Flush buffer to WAV
   const flushBuffer = useCallback(() => {
     if (sampleBufferRef.current.length === 0 || totalSamplesRef.current === 0) {
       return;
     }
 
+    const currentSampleRate = audioContextRef.current?.sampleRate || 44100;
     const totalLength = totalSamplesRef.current;
     const merged = new Float32Array(totalLength);
     let offset = 0;
@@ -52,11 +53,14 @@ export function useAudioPipeline({
       offset += buf.length;
     }
 
-    const durationMs = Math.round((totalLength / 16000) * 1000);
+    const durationMs = Math.round((totalLength / currentSampleRate) * 1000);
 
-    // Only dispatch if buffer contains at least 500ms of audio
-    if (durationMs >= 500) {
-      const wavBlob = encodeWAV(merged, 16000);
+    // Only dispatch if buffer contains at least 400ms of audio
+    if (durationMs >= 400) {
+      console.log(`[AudioPipeline] Flushing slice: ${durationMs}ms at ${currentSampleRate}Hz (downsampling to 16kHz)`);
+      const resampled = downsampleTo16k(merged, currentSampleRate);
+      const wavBlob = encodeWAV(resampled, 16000);
+
       if (onAudioChunkReady) {
         onAudioChunkReady(wavBlob, durationMs);
       }
@@ -64,7 +68,6 @@ export function useAudioPipeline({
 
     sampleBufferRef.current = [];
     totalSamplesRef.current = 0;
-    sliceStartTimeRef.current = Date.now();
   }, [onAudioChunkReady]);
 
   // Volume monitoring loop
@@ -98,7 +101,6 @@ export function useAudioPipeline({
         flushTimeoutRef.current = null;
       }
     } else {
-      // If was speaking, and silence has lasted longer than silenceFlushDelayMs
       if (
         isSpeakingStateRef.current &&
         now - lastSpeechTimeRef.current > silenceFlushDelayMs
@@ -123,31 +125,40 @@ export function useAudioPipeline({
   // Start recording
   const startRecording = useCallback(async () => {
     try {
+      console.log('[AudioPipeline] Requesting microphone access...');
       setError(null);
       sampleBufferRef.current = [];
       totalSamplesRef.current = 0;
-      sliceStartTimeRef.current = Date.now();
 
       if (!navigator?.mediaDevices?.getUserMedia) {
-        throw new Error('Microphone access is not supported in this browser.');
+        throw new Error('Microphone access is not supported by your browser.');
       }
 
+      // Universal audio constraints without overconstraining sampleRate
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          channelCount: 1,
-          sampleRate: 16000,
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
         },
       });
       streamRef.current = stream;
+      console.log('[AudioPipeline] Microphone granted.');
 
+      // Standard AudioContext with native hardware sample rate
       const AudioContextClass =
         window.AudioContext ||
         (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      const audioCtx = new AudioContextClass({ sampleRate: 16000 });
+      const audioCtx = new AudioContextClass();
       audioContextRef.current = audioCtx;
+
+      // Resume context if suspended
+      if (audioCtx.state === 'suspended') {
+        console.log('[AudioPipeline] Resuming suspended AudioContext...');
+        await audioCtx.resume();
+      }
+
+      console.log(`[AudioPipeline] AudioContext active: ${audioCtx.sampleRate}Hz, state: ${audioCtx.state}`);
 
       const source = audioCtx.createMediaStreamSource(stream);
 
@@ -158,42 +169,49 @@ export function useAudioPipeline({
       source.connect(analyser);
       analyserRef.current = analyser;
 
-      // ScriptProcessor for collecting raw 16kHz PCM samples directly
+      // ScriptProcessor for collecting raw audio samples
       const bufferSize = 4096;
       const processor = audioCtx.createScriptProcessor(bufferSize, 1, 1);
       processorRef.current = processor;
 
       processor.onaudioprocess = (e) => {
         const inputData = e.inputBuffer.getChannelData(0);
-        // Copy audio data to buffer
         const copy = new Float32Array(inputData.length);
         copy.set(inputData);
 
         sampleBufferRef.current.push(copy);
         totalSamplesRef.current += copy.length;
 
-        const currentDurationMs = (totalSamplesRef.current / 16000) * 1000;
+        const currentSampleRate = audioCtx.sampleRate || 44100;
+        const currentDurationMs = (totalSamplesRef.current / currentSampleRate) * 1000;
 
-        // Dynamic continuous speech segmenting: flush rolling slices every ~2.2s
+        // Dynamic continuous speech segmenting
         if (currentDurationMs >= chunkDurationMs) {
-          // Only flush if user has been speaking recently
           if (Date.now() - lastSpeechTimeRef.current < 1500) {
             flushBuffer();
           } else {
-            // Discard prolonged silence buffer to avoid wasting API calls
+            // Discard prolonged background silence
             sampleBufferRef.current = [];
             totalSamplesRef.current = 0;
           }
         }
       };
 
+      // Mute gain node to prevent speaker feedback
+      const muteGain = audioCtx.createGain();
+      muteGain.gain.value = 0;
+      muteGainRef.current = muteGain;
+
       source.connect(processor);
-      processor.connect(audioCtx.destination);
+      processor.connect(muteGain);
+      muteGain.connect(audioCtx.destination);
 
       monitorVolume();
       setIsRecording(true);
+      console.log('[AudioPipeline] Recording started successfully.');
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Microphone access failed.';
+      console.error('[AudioPipeline] Failed to start:', err);
       setError(msg);
       setIsRecording(false);
     }
@@ -201,6 +219,7 @@ export function useAudioPipeline({
 
   // Stop recording
   const stopRecording = useCallback(() => {
+    console.log('[AudioPipeline] Stopping recording...');
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
@@ -217,6 +236,11 @@ export function useAudioPipeline({
     if (processorRef.current) {
       processorRef.current.disconnect();
       processorRef.current = null;
+    }
+
+    if (muteGainRef.current) {
+      muteGainRef.current.disconnect();
+      muteGainRef.current = null;
     }
 
     if (streamRef.current) {

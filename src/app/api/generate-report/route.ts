@@ -116,3 +116,4 @@ Generate a comprehensive, structured conversation report in clean Markdown forma
     });
   }
 }
+

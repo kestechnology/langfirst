@@ -1,7 +1,31 @@
 /**
- * Lightweight WAV / PCM encoder for 16kHz mono audio.
+ * Lightweight WAV / PCM encoder for mono audio with universal downsampling to 16kHz.
  * Produces standard RFC 2361 RIFF WAV containers directly from Float32Array audio buffers.
  */
+
+export function downsampleTo16k(
+  samples: Float32Array,
+  sourceSampleRate: number
+): Float32Array {
+  if (sourceSampleRate === 16000) return samples;
+  const ratio = sourceSampleRate / 16000;
+  const newLength = Math.round(samples.length / ratio);
+  const result = new Float32Array(newLength);
+
+  for (let i = 0; i < newLength; i++) {
+    const originalPos = i * ratio;
+    const index = Math.floor(originalPos);
+    const fraction = originalPos - index;
+
+    if (index + 1 < samples.length) {
+      result[i] = samples[index] * (1 - fraction) + samples[index + 1] * fraction;
+    } else {
+      result[i] = samples[index] || 0;
+    }
+  }
+
+  return result;
+}
 
 export function float32To16BitPCM(float32Array: Float32Array): Int16Array {
   const int16Array = new Int16Array(float32Array.length);
@@ -58,4 +82,3 @@ function writeString(view: DataView, offset: number, string: string) {
     view.setUint8(offset + i, string.charCodeAt(i));
   }
 }
-

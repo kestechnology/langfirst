@@ -61,18 +61,24 @@ export function AudioControlBar({
             {/* Pulsing ring during active listening */}
             {isListening && (
               <span
-                className={`absolute w-16 h-16 rounded-full opacity-30 animate-ping ${status === 'speech_detected' ? 'bg-amber-500' : 'bg-emerald-500'
-                  }`}
+                className={`absolute w-16 h-16 rounded-full opacity-30 animate-ping pointer-events-none ${
+                  status === 'speech_detected' ? 'bg-amber-500' : 'bg-emerald-500'
+                }`}
               />
             )}
 
             <button
-              onClick={onToggleMic}
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleMic();
+              }}
               aria-label={isListening ? 'Stop Listening' : 'Start Listening'}
-              className={`relative z-10 w-14 h-14 rounded-full flex items-center justify-center text-white shadow-xl transition-all transform active:scale-95 ${isListening
+              className={`relative z-10 w-14 h-14 rounded-full flex items-center justify-center text-white shadow-xl cursor-pointer transition-all transform active:scale-95 ${
+                isListening
                   ? 'bg-rose-500 hover:bg-rose-600 shadow-rose-500/25 ring-4 ring-rose-500/20'
                   : 'bg-gradient-to-tr from-indigo-500 via-indigo-600 to-emerald-500 hover:opacity-95 shadow-indigo-500/30'
-                }`}
+              }`}
             >
               {isListening ? (
                 <Square className="w-5 h-5 fill-current" />

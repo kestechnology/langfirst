@@ -87,8 +87,12 @@ export function DialogueStream({
           </p>
           {status === 'idle' && (
             <button
-              onClick={onStartListening}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-emerald-500 text-white text-sm font-medium hover:opacity-90 transition-opacity shadow-lg shadow-indigo-500/20"
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onStartListening();
+              }}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-emerald-500 text-white text-sm font-medium hover:opacity-90 transition-opacity shadow-lg shadow-indigo-500/20 cursor-pointer"
             >
               <Mic className="w-4 h-4" />
               Start Listening
