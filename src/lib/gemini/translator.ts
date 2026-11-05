@@ -31,6 +31,7 @@ export async function translateAudioChunk({
   if (openaiKey) {
     return translateWithWhisperPipeline({
       audioBase64,
+      mimeType,
       openaiKey,
       claudeKey,
       previousContext,
@@ -66,12 +67,14 @@ export async function translateAudioChunk({
  */
 async function translateWithWhisperPipeline({
   audioBase64,
+  mimeType = 'audio/webm',
   openaiKey,
   claudeKey,
   previousContext = [],
   speaker = 'Speaker A',
 }: {
   audioBase64: string;
+  mimeType?: string;
   openaiKey: string;
   claudeKey?: string;
   previousContext?: string[];
@@ -84,10 +87,22 @@ async function translateWithWhisperPipeline({
     for (let i = 0; i < binary.length; i++) {
       bytes[i] = binary.charCodeAt(i);
     }
-    const blob = new Blob([bytes], { type: 'audio/wav' });
+
+    const cleanMime = mimeType ? mimeType.split(';')[0].trim() : 'audio/webm';
+    const ext = cleanMime.includes('webm')
+      ? 'webm'
+      : cleanMime.includes('mp4') || cleanMime.includes('m4a')
+      ? 'm4a'
+      : cleanMime.includes('ogg')
+      ? 'ogg'
+      : cleanMime.includes('mp3')
+      ? 'mp3'
+      : 'wav';
+    const filename = `audio.${ext}`;
+    const blob = new Blob([bytes], { type: cleanMime });
 
     const formData = new FormData();
-    formData.append('file', blob, 'audio.wav');
+    formData.append('file', blob, filename);
     formData.append('model', 'whisper-1');
     formData.append('response_format', 'json');
 
