@@ -92,12 +92,12 @@ async function translateWithWhisperPipeline({
     const ext = cleanMime.includes('webm')
       ? 'webm'
       : cleanMime.includes('mp4') || cleanMime.includes('m4a')
-      ? 'm4a'
-      : cleanMime.includes('ogg')
-      ? 'ogg'
-      : cleanMime.includes('mp3')
-      ? 'mp3'
-      : 'wav';
+        ? 'm4a'
+        : cleanMime.includes('ogg')
+          ? 'ogg'
+          : cleanMime.includes('mp3')
+            ? 'mp3'
+            : 'wav';
     const filename = `audio.${ext}`;
     const blob = new Blob([bytes], { type: cleanMime });
 
@@ -184,6 +184,118 @@ async function translateWithWhisperPipeline({
 }
 
 /**
+ * Strips raw JSON syntax, curly braces, and keys if raw JSON ever appears in text.
+ */
+export function sanitizeCleanText(str: string): string {
+  if (!str) return '';
+  let s = str.trim();
+
+  // Strip markdown code fences ```json ... ```
+  s = s.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+
+  // If text is wrapped in JSON braces e.g. {"speaker": ...}
+  if (s.startsWith('{') && s.endsWith('}')) {
+    const match = s.match(/"translation"\s*:\s*"([\s\S]*?)"/);
+    if (match) {
+      return match[1].replace(/\\"/g, '"').trim();
+    }
+  }
+
+  // Remove common JSON field keys if accidentally leaked
+  s = s.replace(/"?(?:speaker|detected_lang|transcription|translation|is_final)"?\s*:\s*/gi, '');
+  // Strip outer quotes and brackets
+  s = s.replace(/^[{\[\s"]+|[}\]\s"]+$/g, '');
+  return s.trim();
+}
+
+/**
+ * Robustly parses model output, extracting ONLY pure English translation and native transcription.
+ * Protects against malformed JSON, unescaped quotes, or conversational wrapper text.
+ */
+function extractTranslationFields(
+  rawResponseText: string,
+  fallbackTranscript: string,
+  fallbackSpeaker: string = 'Speaker A'
+): StreamChunkResponse {
+  let cleaned = rawResponseText.trim();
+  cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+
+  const validLangs = ['Esan', 'Nigerian English', 'Esan / English', 'English', 'None'];
+
+  // 1. Try standard JSON.parse
+  try {
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (parsed && typeof parsed === 'object') {
+        let translation = typeof parsed.translation === 'string' ? parsed.translation : '';
+        let transcription = typeof parsed.transcription === 'string' ? parsed.transcription : '';
+        let lang = typeof parsed.detected_lang === 'string' ? parsed.detected_lang : 'Esan / English';
+        let speaker = typeof parsed.speaker === 'string' ? parsed.speaker : fallbackSpeaker;
+
+        if (!validLangs.includes(lang)) {
+          lang = 'Esan / English';
+        }
+
+        translation = sanitizeCleanText(translation);
+        transcription = sanitizeCleanText(transcription);
+
+        if (!translation) {
+          translation = fallbackTranscript;
+        }
+
+        return {
+          speaker,
+          detected_lang: lang,
+          transcription: transcription || fallbackTranscript,
+          translation,
+          is_final: true,
+        };
+      }
+    }
+  } catch {
+    // JSON syntax error -> fall through to regex extraction
+  }
+
+  // 2. Fallback regex extraction
+  const translationMatch =
+    cleaned.match(/"translation"\s*:\s*"([\s\S]*?)"(?=\s*,\s*"|\s*\}|\s*$)/) ||
+    cleaned.match(/"translation"\s*:\s*"([\s\S]*?)"/);
+
+  const transcriptionMatch =
+    cleaned.match(/"transcription"\s*:\s*"([\s\S]*?)"(?=\s*,\s*"|\s*\}|\s*$)/) ||
+    cleaned.match(/"transcription"\s*:\s*"([\s\S]*?)"/);
+
+  const langMatch = cleaned.match(/"detected_lang"\s*:\s*"([^"]+)"/);
+  const speakerMatch = cleaned.match(/"speaker"\s*:\s*"([^"]+)"/);
+
+  let translation = translationMatch ? translationMatch[1].trim() : '';
+  let transcription = transcriptionMatch ? transcriptionMatch[1].trim() : fallbackTranscript;
+  let detected_lang = langMatch ? langMatch[1].trim() : 'Esan / English';
+  let speaker = speakerMatch ? speakerMatch[1].trim() : fallbackSpeaker;
+
+  if (!validLangs.includes(detected_lang)) {
+    detected_lang = 'Esan / English';
+  }
+
+  // If translation was missing or was raw JSON
+  if (!translation || translation.startsWith('{') || translation.includes('"translation":')) {
+    translation = cleaned.startsWith('{') ? fallbackTranscript : cleaned;
+  }
+
+  translation = sanitizeCleanText(translation);
+  transcription = sanitizeCleanText(transcription);
+
+  return {
+    speaker,
+    detected_lang,
+    transcription: transcription || fallbackTranscript,
+    translation: translation || fallbackTranscript,
+    is_final: true,
+  };
+}
+
+/**
  * Refines transcription with Anthropic Claude applying Esan phonetic rules & formatting
  */
 async function refineWithClaude({
@@ -221,7 +333,7 @@ async function refineWithClaude({
       console.warn('[Claude] Refinement error, returning raw transcript:', err);
       return {
         speaker,
-        detected_lang: 'Detected Speech',
+        detected_lang: 'Esan / English',
         transcription: rawTranscript,
         translation: rawTranscript,
         is_final: true,
@@ -230,38 +342,11 @@ async function refineWithClaude({
 
     const data = await res.json();
     const content = data.content?.[0]?.text || '';
-    const cleanedJson = content.replace(/```json/g, '').replace(/```/g, '').trim();
-
-    // Find JSON boundary if extra text was included
-    const jsonMatch = cleanedJson.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      const validLangs = ['Esan', 'Nigerian English', 'Esan / English', 'English', 'None'];
-      let lang = parsed.detected_lang || 'Esan';
-      if (!validLangs.includes(lang)) {
-        lang = 'Esan / English';
-      }
-
-      return {
-        speaker: parsed.speaker || speaker,
-        detected_lang: lang,
-        transcription: parsed.transcription || rawTranscript,
-        translation: parsed.translation || rawTranscript,
-        is_final: parsed.is_final ?? true,
-      };
-    }
-
-    return {
-      speaker,
-      detected_lang: 'Esan',
-      transcription: rawTranscript,
-      translation: content,
-      is_final: true,
-    };
+    return extractTranslationFields(content, rawTranscript, speaker);
   } catch (err) {
     return {
       speaker,
-      detected_lang: 'Esan',
+      detected_lang: 'Esan / English',
       transcription: rawTranscript,
       translation: rawTranscript,
       is_final: true,
@@ -309,7 +394,7 @@ async function refineWithGPT4oMini({
     if (!res.ok) {
       return {
         speaker,
-        detected_lang: 'Speech',
+        detected_lang: 'Esan / English',
         transcription: rawTranscript,
         translation: rawTranscript,
         is_final: true,
@@ -317,26 +402,12 @@ async function refineWithGPT4oMini({
     }
 
     const data = await res.json();
-    const text = data.choices?.[0]?.message?.content || '{}';
-    const parsed = JSON.parse(text);
-
-    const validLangs = ['Esan', 'Nigerian English', 'Esan / English', 'English', 'None'];
-    let lang = parsed.detected_lang || 'Esan';
-    if (!validLangs.includes(lang)) {
-      lang = 'Esan / English';
-    }
-
-    return {
-      speaker: parsed.speaker || speaker,
-      detected_lang: lang,
-      transcription: parsed.transcription || rawTranscript,
-      translation: parsed.translation || rawTranscript,
-      is_final: parsed.is_final ?? true,
-    };
+    const content = data.choices?.[0]?.message?.content || '{}';
+    return extractTranslationFields(content, rawTranscript, speaker);
   } catch {
     return {
       speaker,
-      detected_lang: 'Speech',
+      detected_lang: 'Esan / English',
       transcription: rawTranscript,
       translation: rawTranscript,
       is_final: true,

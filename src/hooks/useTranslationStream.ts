@@ -12,6 +12,19 @@ export interface UseTranslationStreamOptions {
   onError?: (errorMsg: string) => void;
 }
 
+function cleanDisplayString(str: string): string {
+  if (!str) return '';
+  let s = str.trim();
+  s = s.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+  if (s.startsWith('{') && s.endsWith('}')) {
+    const match = s.match(/"translation"\s*:\s*"([\s\S]*?)"/);
+    if (match) return match[1].replace(/\\"/g, '"').trim();
+  }
+  s = s.replace(/"?(?:speaker|detected_lang|transcription|translation|is_final)"?\s*:\s*/gi, '');
+  s = s.replace(/^[{\[\s"]+|[}\]\s"]+$/g, '');
+  return s.trim();
+}
+
 export function useTranslationStream({
   onNewMessage,
   onInterimUpdate,
@@ -112,22 +125,25 @@ export function useTranslationStream({
                   continue;
                 }
 
-                if (payload.translation && payload.translation.trim().length > 0) {
+                const cleanTranslation = cleanDisplayString(payload.translation || '');
+                const cleanTranscription = cleanDisplayString(payload.transcription || '');
+
+                if (cleanTranslation && cleanTranslation.length > 0) {
                   const latency = Date.now() - startTime;
                   setLatestLatencyMs(latency);
 
                   const newMessage: TranslationMessage = {
                     id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
                     speaker: payload.speaker || 'Speaker A',
-                    detected_lang: payload.detected_lang || 'Esan',
-                    transcription: payload.transcription || '',
-                    translation: payload.translation,
+                    detected_lang: payload.detected_lang || 'Esan / English',
+                    transcription: cleanTranscription,
+                    translation: cleanTranslation,
                     is_final: payload.is_final ?? true,
                     timestamp: Date.now(),
                   };
 
                   // Update rolling context memory
-                  contextHistoryRef.current.push(payload.translation);
+                  contextHistoryRef.current.push(cleanTranslation);
                   if (contextHistoryRef.current.length > 4) {
                     contextHistoryRef.current.shift();
                   }
