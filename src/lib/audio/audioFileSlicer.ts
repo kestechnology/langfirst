@@ -9,31 +9,37 @@ export interface AudioSlice {
 }
 
 /**
- * Decodes an audio file in-browser and slices it into segments (e.g. 10s slices)
- * rendered to 16kHz mono WAV for sequential streaming to Gemini.
+ * Decodes an audio file in-browser and slices it cleanly into high-fidelity
+ * 16kHz mono WAV segments.
+ *
+ * For files <= 30s: emits a single continuous slice for zero word-chopping.
+ * For longer files: cuts along natural silence/low-energy valleys to keep words intact.
  */
 export async function sliceAudioFile(
   file: File,
-  sliceDurationSec: number = 10,
+  targetSliceDurationSec: number = 15,
   onProgress?: (progressPercent: number) => void
 ): Promise<AudioSlice[]> {
   const AudioContextClass =
     window.AudioContext ||
     (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-  const audioCtx = new AudioContextClass({ sampleRate: 16000 });
+
+  if (!AudioContextClass) {
+    throw new Error('Web Audio API is not supported in this browser.');
+  }
+
+  const audioCtx = new AudioContextClass();
 
   try {
     const arrayBuffer = await file.arrayBuffer();
     const decodedAudio = await audioCtx.decodeAudioData(arrayBuffer);
 
-    const targetSampleRate = 16000;
+    const sourceSampleRate = decodedAudio.sampleRate;
     const totalDurationSec = decodedAudio.duration;
-    const slicesCount = Math.ceil(totalDurationSec / sliceDurationSec);
-    const slices: AudioSlice[] = [];
+    const length = decodedAudio.length;
 
     // Extract mono channel data (or mixdown stereo)
     const numberOfChannels = decodedAudio.numberOfChannels;
-    const length = decodedAudio.length;
     const monoChannel = new Float32Array(length);
 
     if (numberOfChannels === 1) {
@@ -46,40 +52,90 @@ export async function sliceAudioFile(
       }
     }
 
-    const samplesPerSlice = sliceDurationSec * decodedAudio.sampleRate;
+    const slices: AudioSlice[] = [];
 
-    for (let i = 0; i < slicesCount; i++) {
-      const startSample = i * samplesPerSlice;
-      const endSample = Math.min(length, (i + 1) * samplesPerSlice);
-      const sliceLength = endSample - startSample;
-
-      if (sliceLength <= 0) break;
-
-      const sliceData = monoChannel.subarray(startSample, endSample);
-
-      // Resample to 16kHz if needed (or encode directly if already 16kHz)
-      let resampledData: Float32Array;
-      if (decodedAudio.sampleRate === targetSampleRate) {
-        resampledData = sliceData;
-      } else {
-        resampledData = resampleBuffer(sliceData, decodedAudio.sampleRate, targetSampleRate);
-      }
-
-      const wavBlob = encodeWAV(resampledData, targetSampleRate);
-      const startTimeSec = i * sliceDurationSec;
-      const endTimeSec = Math.min(totalDurationSec, (i + 1) * sliceDurationSec);
+    // Case 1: Short audio (<= 30 seconds) -> Process as a single complete segment
+    if (totalDurationSec <= 30) {
+      const resampledData = resampleBuffer(monoChannel, sourceSampleRate, 16000);
+      const wavBlob = encodeWAV(resampledData, 16000);
 
       slices.push({
-        index: i,
+        index: 0,
         blob: wavBlob,
-        startTimeSec,
-        endTimeSec,
-        durationSec: endTimeSec - startTimeSec,
+        startTimeSec: 0,
+        endTimeSec: totalDurationSec,
+        durationSec: totalDurationSec,
       });
 
-      onProgress?.(Math.round(((i + 1) / slicesCount) * 100));
+      onProgress?.(100);
+      return slices;
     }
 
+    // Case 2: Longer audio -> Smart VAD silence-boundary slicing
+    let currentSample = 0;
+    let sliceIndex = 0;
+    const targetSamplesPerSlice = Math.round(targetSliceDurationSec * sourceSampleRate);
+    const searchWindowSamples = Math.round(2.0 * sourceSampleRate); // +/- 2.0s search window
+
+    while (currentSample < length) {
+      const remainingSamples = length - currentSample;
+
+      // If remaining audio is within 1.5x of slice duration, take the rest as the final slice
+      if (remainingSamples <= targetSamplesPerSlice * 1.3) {
+        const sliceData = monoChannel.subarray(currentSample, length);
+        const resampled = resampleBuffer(sliceData, sourceSampleRate, 16000);
+        const wavBlob = encodeWAV(resampled, 16000);
+
+        slices.push({
+          index: sliceIndex++,
+          blob: wavBlob,
+          startTimeSec: currentSample / sourceSampleRate,
+          endTimeSec: totalDurationSec,
+          durationSec: (length - currentSample) / sourceSampleRate,
+        });
+
+        break;
+      }
+
+      // Ideal boundary point
+      const nominalEndSample = currentSample + targetSamplesPerSlice;
+      const searchStart = Math.max(currentSample + targetSamplesPerSlice - searchWindowSamples, currentSample);
+      const searchEnd = Math.min(nominalEndSample + searchWindowSamples, length);
+
+      // Find the point of minimum acoustic energy in the search window (silence gap)
+      let bestCutSample = nominalEndSample;
+      let minEnergy = Infinity;
+      const step = Math.round(sourceSampleRate * 0.05); // 50ms step
+
+      for (let s = searchStart; s < searchEnd - step; s += step) {
+        let energy = 0;
+        for (let j = 0; j < step; j++) {
+          const val = monoChannel[s + j];
+          energy += val * val;
+        }
+        if (energy < minEnergy) {
+          minEnergy = energy;
+          bestCutSample = s + Math.round(step / 2);
+        }
+      }
+
+      const sliceData = monoChannel.subarray(currentSample, bestCutSample);
+      const resampled = resampleBuffer(sliceData, sourceSampleRate, 16000);
+      const wavBlob = encodeWAV(resampled, 16000);
+
+      slices.push({
+        index: sliceIndex++,
+        blob: wavBlob,
+        startTimeSec: currentSample / sourceSampleRate,
+        endTimeSec: bestCutSample / sourceSampleRate,
+        durationSec: (bestCutSample - currentSample) / sourceSampleRate,
+      });
+
+      currentSample = bestCutSample;
+      onProgress?.(Math.min(99, Math.round((currentSample / length) * 100)));
+    }
+
+    onProgress?.(100);
     return slices;
   } finally {
     audioCtx.close().catch(() => {});
@@ -87,7 +143,7 @@ export async function sliceAudioFile(
 }
 
 /**
- * Simple linear interpolation audio resampler.
+ * High-fidelity linear interpolation audio resampler.
  */
 function resampleBuffer(
   buffer: Float32Array,
@@ -113,4 +169,3 @@ function resampleBuffer(
 
   return result;
 }
-

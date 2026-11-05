@@ -61,7 +61,7 @@ export default function Home() {
     stopRecording,
   } = useAudioPipeline({
     onAudioChunkReady: handleAudioChunkReady,
-    chunkDurationMs: 2400,
+    chunkDurationMs: 4500,
   });
 
   const handleToggleMic = React.useCallback(async () => {

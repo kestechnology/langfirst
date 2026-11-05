@@ -6,15 +6,15 @@ import { downsampleTo16k, encodeWAV } from '@/lib/audio/wavEncoder';
 export interface UseAudioPipelineOptions {
   onAudioChunkReady?: (blob: Blob, durationMs: number) => void;
   onSpeechActivityChange?: (isSpeaking: boolean) => void;
-  chunkDurationMs?: number; // max speech slice window (e.g. 2400ms)
+  chunkDurationMs?: number; // max speech window ceiling (e.g. 4500ms)
   silenceThreshold?: number; // RMS volume threshold for speech detection
 }
 
 export function useAudioPipeline({
   onAudioChunkReady,
   onSpeechActivityChange,
-  chunkDurationMs = 2400,
-  silenceThreshold = 0.02,
+  chunkDurationMs = 4500,
+  silenceThreshold = 0.018,
 }: UseAudioPipelineOptions = {}) {
   const [isRecording, setIsRecording] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -49,6 +49,7 @@ export function useAudioPipeline({
 
   // PCM collection & VAD state refs
   const pcmBuffersRef = useRef<Float32Array[]>([]);
+  const preRollBuffersRef = useRef<Float32Array[]>([]); // Circular ~300ms pre-roll to catch initial consonants
   const totalSamplesRef = useRef<number>(0);
   const hasVoiceInWindowRef = useRef<boolean>(false);
   const isSpeakingStateRef = useRef<boolean>(false);
@@ -68,14 +69,18 @@ export function useAudioPipeline({
     const now = Date.now();
 
     const maxDuration = chunkDurationMsRef.current;
-    const isIntervalReached = currentDurationMs >= maxDuration;
+
+    // Natural pause detection: user spoke, has paused for >= 700ms, and total speech >= 1000ms
     const isNaturalPause =
       hasVoiceInWindowRef.current &&
       !isSpeakingStateRef.current &&
-      now - lastVoiceTimeRef.current > 600 &&
-      currentDurationMs >= 700;
+      now - lastVoiceTimeRef.current >= 700 &&
+      currentDurationMs >= 1000;
 
-    if (!force && !isIntervalReached && !isNaturalPause) {
+    // Maximum ceiling reached during continuous uninterrupted speech (e.g. 4.5s)
+    const isMaxCeilingReached = currentDurationMs >= maxDuration;
+
+    if (!force && !isNaturalPause && !isMaxCeilingReached) {
       return;
     }
 
@@ -91,6 +96,7 @@ export function useAudioPipeline({
 
       // Reset buffer immediately
       pcmBuffersRef.current = [];
+      preRollBuffersRef.current = [];
       totalSamplesRef.current = 0;
       hasVoiceInWindowRef.current = false;
 
@@ -100,10 +106,10 @@ export function useAudioPipeline({
       const wavBlob = encodeWAV(downsampled, 16000);
       const emittedDuration = Math.round((downsampled.length / 16000) * 1000);
 
-      console.log(`[AudioPipeline] Emitting 16kHz WAV slice: ${wavBlob.size} bytes (${emittedDuration}ms)`);
+      console.log(`[AudioPipeline] Emitting high-fidelity 16kHz WAV slice: ${wavBlob.size} bytes (${emittedDuration}ms)`);
       onAudioChunkReadyRef.current?.(wavBlob, emittedDuration);
     } else {
-      // Pure silence: silently discard to prevent sending silence to Whisper
+      // Pure silence: discard to avoid calling Whisper on ambient room noise
       pcmBuffersRef.current = [];
       totalSamplesRef.current = 0;
       hasVoiceInWindowRef.current = false;
@@ -131,7 +137,19 @@ export function useAudioPipeline({
 
     if (hasVoice) {
       lastVoiceTimeRef.current = now;
-      hasVoiceInWindowRef.current = true;
+
+      // When voice starts, flush pre-roll ring buffer into active speech buffer
+      if (!hasVoiceInWindowRef.current) {
+        hasVoiceInWindowRef.current = true;
+        if (preRollBuffersRef.current.length > 0) {
+          for (const preBuf of preRollBuffersRef.current) {
+            pcmBuffersRef.current.push(preBuf);
+            totalSamplesRef.current += preBuf.length;
+          }
+          preRollBuffersRef.current = [];
+        }
+      }
+
       if (!isSpeakingStateRef.current) {
         isSpeakingStateRef.current = true;
         setIsSpeaking(true);
@@ -218,6 +236,7 @@ export function useAudioPipeline({
     }
 
     pcmBuffersRef.current = [];
+    preRollBuffersRef.current = [];
     totalSamplesRef.current = 0;
     hasVoiceInWindowRef.current = false;
     isSpeakingStateRef.current = false;
@@ -242,18 +261,19 @@ export function useAudioPipeline({
         throw new Error('Microphone access is not supported in this browser.');
       }
 
-      // Universal audio capture constraints with fallback
+      // Voice capture constraints: disable aggressive noise suppression to preserve Esan stop consonants
       let stream: MediaStream;
       try {
         stream = await navigator.mediaDevices.getUserMedia({
           audio: {
+            channelCount: 1,
             echoCancellation: true,
-            noiseSuppression: true,
+            noiseSuppression: false, // Preserves natural tone and stops
             autoGainControl: true,
           },
         });
       } catch (err) {
-        console.warn('[AudioPipeline] Preferred audio constraints failed, falling back to audio: true', err);
+        console.warn('[AudioPipeline] Custom audio constraints failed, using basic audio: true', err);
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       }
 
@@ -272,7 +292,7 @@ export function useAudioPipeline({
       const audioCtx = new AudioContextClass();
       audioContextRef.current = audioCtx;
 
-      // DO NOT await audioCtx.resume()! Fire-and-forget so Chrome Autoplay Policy doesn't hang the call
+      // Fire-and-forget resume
       audioCtx.resume().catch(() => {});
 
       const source = audioCtx.createMediaStreamSource(stream);
@@ -297,11 +317,19 @@ export function useAudioPipeline({
 
       processor.onaudioprocess = (e: AudioProcessingEvent) => {
         const inputData = e.inputBuffer.getChannelData(0);
-        // Create an independent copy of PCM samples
         const copy = new Float32Array(inputData.length);
         copy.set(inputData);
-        pcmBuffersRef.current.push(copy);
-        totalSamplesRef.current += copy.length;
+
+        if (!hasVoiceInWindowRef.current) {
+          // Circular ring buffer for ~300ms pre-roll
+          preRollBuffersRef.current.push(copy);
+          if (preRollBuffersRef.current.length > 4) {
+            preRollBuffersRef.current.shift();
+          }
+        } else {
+          pcmBuffersRef.current.push(copy);
+          totalSamplesRef.current += copy.length;
+        }
       };
 
       source.connect(processor);
@@ -310,6 +338,7 @@ export function useAudioPipeline({
 
       // Reset buffers
       pcmBuffersRef.current = [];
+      preRollBuffersRef.current = [];
       totalSamplesRef.current = 0;
       hasVoiceInWindowRef.current = false;
       isSpeakingStateRef.current = false;

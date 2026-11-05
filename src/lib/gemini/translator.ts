@@ -105,6 +105,11 @@ async function translateWithWhisperPipeline({
     formData.append('file', blob, filename);
     formData.append('model', 'whisper-1');
     formData.append('response_format', 'json');
+    formData.append('temperature', '0.0');
+    formData.append(
+      'prompt',
+      "Central Edo (Esan) language and Nigerian English: Ọb'okhian, vbọ khian, vbe oye he, erọlọ, ọya waigbe, ẹkpafọ kẹina, kọkọ, alẹkhe, no wahala, we dey, wetin dey happen, how body, I dey fine well well, na so."
+    );
 
     const whisperRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
       method: 'POST',
@@ -231,9 +236,15 @@ async function refineWithClaude({
     const jsonMatch = cleanedJson.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0]);
+      const validLangs = ['Esan', 'Nigerian English', 'Esan / English', 'English', 'None'];
+      let lang = parsed.detected_lang || 'Esan';
+      if (!validLangs.includes(lang)) {
+        lang = 'Esan / English';
+      }
+
       return {
         speaker: parsed.speaker || speaker,
-        detected_lang: parsed.detected_lang || 'Esan',
+        detected_lang: lang,
         transcription: parsed.transcription || rawTranscript,
         translation: parsed.translation || rawTranscript,
         is_final: parsed.is_final ?? true,
@@ -309,9 +320,15 @@ async function refineWithGPT4oMini({
     const text = data.choices?.[0]?.message?.content || '{}';
     const parsed = JSON.parse(text);
 
+    const validLangs = ['Esan', 'Nigerian English', 'Esan / English', 'English', 'None'];
+    let lang = parsed.detected_lang || 'Esan';
+    if (!validLangs.includes(lang)) {
+      lang = 'Esan / English';
+    }
+
     return {
       speaker: parsed.speaker || speaker,
-      detected_lang: parsed.detected_lang || 'Esan',
+      detected_lang: lang,
       transcription: parsed.transcription || rawTranscript,
       translation: parsed.translation || rawTranscript,
       is_final: parsed.is_final ?? true,
