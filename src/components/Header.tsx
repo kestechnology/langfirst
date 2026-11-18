@@ -91,7 +91,7 @@ export function Header({
               </span>
             </div>
             <p className="text-xs text-neutral-400 flex items-center gap-1.5">
-              <span>Esan (Central Edo)</span>
+              <span>Auto-Detect (Any Language)</span>
               <span className="text-neutral-600">→</span>
               <span className="text-neutral-200 font-medium">English</span>
             </p>

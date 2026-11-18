@@ -4,14 +4,14 @@ export interface LanguageOption {
   isDefault?: boolean;
 }
 
-// For MVP: Target translated language is strictly English.
+// Target translated language is strictly English
 export const DEFAULT_TARGET_LANGUAGE: LanguageOption = {
   code: 'en',
   name: 'English',
   isDefault: true,
 };
 
-// Planned choices for future expansion
+// Planned choices for future target expansion
 export const FUTURE_TARGET_LANGUAGES: LanguageOption[] = [
   DEFAULT_TARGET_LANGUAGE,
   { code: 'fr', name: 'French' },
@@ -21,9 +21,8 @@ export const FUTURE_TARGET_LANGUAGES: LanguageOption[] = [
   { code: 'ig', name: 'Igbo' },
 ];
 
-// Primary supported source language focus for MVP
+// Source language mode: Universal auto-detection for all world languages
 export const SOURCE_LANGUAGE_FOCUS = {
-  name: 'Esan (Central Edo)',
-  codeMixing: 'Nigerian English',
+  name: 'Auto-Detect (Any Language)',
+  codeMixing: 'Multilingual Code-Mixing',
 };
-

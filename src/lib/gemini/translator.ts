@@ -1,5 +1,5 @@
 import {
-  ESAN_TRANSLATION_SYSTEM_PROMPT,
+  UNIVERSAL_TRANSLATION_SYSTEM_PROMPT,
   buildTranslationPrompt,
 } from './prompts';
 import { StreamChunkResponse } from '@/types/translation';
@@ -163,10 +163,11 @@ async function translateWithWhisperPipeline({
     formData.append('model', 'whisper-1');
     formData.append('response_format', 'json');
     formData.append('temperature', '0.0');
-    formData.append(
-      'prompt',
-      "Ọb'okhian, vbe oye he? Ọya waigbe, erọlọ, ẹkpafọ kẹina, kọkọ, alẹkhe. How body? No wahala, we dey alright, I dey fine well well, na so."
-    );
+    const multilingualPrompt =
+      previousContext && previousContext.length > 0
+        ? previousContext.slice(-2).join('. ')
+        : 'Multilingual speech translation to English. Spanish, French, Yoruba, Esan, Igbo, Hausa, Pidgin, German, Mandarin, Arabic, English.';
+    formData.append('prompt', multilingualPrompt);
 
     const whisperRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
       method: 'POST',
@@ -264,8 +265,6 @@ function extractTranslationFields(
   let cleaned = rawResponseText.trim();
   cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
 
-  const validLangs = ['Esan', 'Nigerian English', 'Esan / English', 'English', 'None'];
-
   // 1. Try standard JSON.parse
   try {
     const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
@@ -274,11 +273,11 @@ function extractTranslationFields(
       if (parsed && typeof parsed === 'object') {
         let translation = typeof parsed.translation === 'string' ? parsed.translation : '';
         let transcription = typeof parsed.transcription === 'string' ? parsed.transcription : '';
-        let lang = typeof parsed.detected_lang === 'string' ? parsed.detected_lang : 'Esan / English';
+        let lang = typeof parsed.detected_lang === 'string' ? parsed.detected_lang.trim() : 'Auto-Detected';
         let speaker = typeof parsed.speaker === 'string' ? parsed.speaker : fallbackSpeaker;
 
-        if (!validLangs.includes(lang)) {
-          lang = 'Esan / English';
+        if (!lang || lang.toLowerCase() === 'undefined' || lang.toLowerCase() === 'null') {
+          lang = 'Auto-Detected';
         }
 
         translation = sanitizeCleanText(translation);
@@ -315,11 +314,11 @@ function extractTranslationFields(
 
   let translation = translationMatch ? translationMatch[1].trim() : '';
   let transcription = transcriptionMatch ? transcriptionMatch[1].trim() : fallbackTranscript;
-  let detected_lang = langMatch ? langMatch[1].trim() : 'Esan / English';
+  let detected_lang = langMatch ? langMatch[1].trim() : 'Auto-Detected';
   let speaker = speakerMatch ? speakerMatch[1].trim() : fallbackSpeaker;
 
-  if (!validLangs.includes(detected_lang)) {
-    detected_lang = 'Esan / English';
+  if (!detected_lang || detected_lang.toLowerCase() === 'undefined') {
+    detected_lang = 'Auto-Detected';
   }
 
   // If translation was missing or was raw JSON
@@ -367,7 +366,7 @@ async function refineWithClaude({
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 1000,
-        system: ESAN_TRANSLATION_SYSTEM_PROMPT,
+        system: UNIVERSAL_TRANSLATION_SYSTEM_PROMPT,
         messages: [{ role: 'user', content: userMessage }],
       }),
     });
@@ -377,7 +376,7 @@ async function refineWithClaude({
       console.warn('[Claude] Refinement error, returning raw transcript:', err);
       return {
         speaker,
-        detected_lang: 'Esan / English',
+        detected_lang: 'Auto-Detected',
         transcription: rawTranscript,
         translation: rawTranscript,
         is_final: true,
@@ -390,7 +389,7 @@ async function refineWithClaude({
   } catch (err) {
     return {
       speaker,
-      detected_lang: 'Esan / English',
+      detected_lang: 'Auto-Detected',
       transcription: rawTranscript,
       translation: rawTranscript,
       is_final: true,
@@ -425,7 +424,7 @@ async function refineWithGPT4oMini({
         model: 'gpt-4o-mini',
         response_format: { type: 'json_object' },
         messages: [
-          { role: 'system', content: ESAN_TRANSLATION_SYSTEM_PROMPT },
+          { role: 'system', content: UNIVERSAL_TRANSLATION_SYSTEM_PROMPT },
           {
             role: 'user',
             content: `${promptText}\n\nSpoken acoustic transcript to translate:\n"${rawTranscript}"`,
@@ -438,7 +437,7 @@ async function refineWithGPT4oMini({
     if (!res.ok) {
       return {
         speaker,
-        detected_lang: 'Esan / English',
+        detected_lang: 'Auto-Detected',
         transcription: rawTranscript,
         translation: rawTranscript,
         is_final: true,
@@ -451,7 +450,7 @@ async function refineWithGPT4oMini({
   } catch {
     return {
       speaker,
-      detected_lang: 'Esan / English',
+      detected_lang: 'Auto-Detected',
       transcription: rawTranscript,
       translation: rawTranscript,
       is_final: true,
@@ -527,7 +526,7 @@ async function translateWithGemini({
 
     const requestBody = {
       system_instruction: {
-        parts: [{ text: ESAN_TRANSLATION_SYSTEM_PROMPT }],
+        parts: [{ text: UNIVERSAL_TRANSLATION_SYSTEM_PROMPT }],
       },
       contents: [
         {
@@ -599,7 +598,7 @@ async function translateWithGemini({
 
     return {
       speaker: parsed.speaker || speaker,
-      detected_lang: parsed.detected_lang || 'Esan',
+      detected_lang: parsed.detected_lang || 'Auto-Detected',
       transcription: parsed.transcription || '',
       translation: parsed.translation || '',
       is_final: parsed.is_final ?? true,

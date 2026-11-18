@@ -17,7 +17,7 @@ export async function POST(req: NextRequest) {
     const conversationTranscript = messages
       .map(
         (m, idx) =>
-          `[${idx + 1}] ${m.speaker} (${m.detected_lang || 'Esan'}): "${m.transcription || ''}" -> English: "${m.translation}"`
+          `[${idx + 1}] ${m.speaker} (${m.detected_lang || 'Detected Language'}): "${m.transcription || ''}" -> English: "${m.translation}"`
       )
       .join('\n');
 
@@ -25,8 +25,8 @@ export async function POST(req: NextRequest) {
     const openaiKey = process.env.OPENAI_API_KEY;
 
     const systemPrompt = `
-You are an expert bilingual conversation analyst.
-You will receive a conversation transcript originally spoken in Central Edo (Esan) code-mixed with Nigerian English, translated into English.
+You are an expert multilingual conversation analyst.
+You will receive a conversation transcript spoken in various world languages or dialects and translated into English.
 
 Generate a comprehensive, structured conversation report in clean Markdown formatting:
 # Conversation Executive Report
@@ -40,7 +40,7 @@ Generate a comprehensive, structured conversation report in clean Markdown forma
 (List of any agreed commitments, tasks, or follow-ups; or "None specified" if purely conversational)
 
 ### 4. Cultural & Linguistic Nuances
-(Brief notes on notable Esan idioms or expressions used, such as erọlọ, ọya waigbe, etc.)
+(Brief notes on notable expressions, idioms, or cultural nuances used; or "Standard conversational exchange" if straightforward)
 `.trim();
 
     // Call Claude

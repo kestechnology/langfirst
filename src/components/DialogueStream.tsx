@@ -82,7 +82,7 @@ export function DialogueStream({
           </h2>
           <p className="text-sm text-neutral-400 max-w-md mb-6 leading-relaxed">
             {status === 'listening' || status === 'speech_detected'
-              ? 'Speak in Esan or Nigerian English. Translations will appear here in real time.'
+              ? 'Speak in any language (Spanish, French, Yoruba, Esan, Hausa, German, Japanese, etc.). Translations will appear here in real time.'
               : 'Tap the microphone below to start real-time bilingual translation.'}
           </p>
           {(status === 'idle' || status === 'error') && (
