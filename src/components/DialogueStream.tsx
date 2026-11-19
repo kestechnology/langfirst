@@ -11,6 +11,8 @@ interface DialogueStreamProps {
   status: PipelineStatus;
   isBilingual: boolean;
   onStartListening: () => void;
+  selectedLanguageName?: string;
+  onSwitchLanguage?: (langName: string) => void;
 }
 
 function FormattedTime({ timestamp }: { timestamp: number }) {
@@ -39,6 +41,8 @@ export function DialogueStream({
   status,
   isBilingual,
   onStartListening,
+  selectedLanguageName = 'Edo (Central Edo)',
+  onSwitchLanguage,
 }: DialogueStreamProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -77,13 +81,13 @@ export function DialogueStream({
           </div>
           <h2 className="text-lg font-medium text-white mb-1">
             {status === 'listening' || status === 'speech_detected'
-              ? 'Listening to speech...'
+              ? `Listening for ${selectedLanguageName}...`
               : 'Ready for Conversation'}
           </h2>
           <p className="text-sm text-neutral-400 max-w-md mb-6 leading-relaxed">
             {status === 'listening' || status === 'speech_detected'
-              ? 'Speak in any language (Spanish, French, Yoruba, Esan, Hausa, German, Japanese, etc.). Translations will appear here in real time.'
-              : 'Tap the microphone below to start real-time bilingual translation.'}
+              ? `Speak in ${selectedLanguageName}. Translations will appear here in real time.`
+              : `Tap the microphone below to start real-time translation from ${selectedLanguageName} to English.`}
           </p>
           {(status === 'idle' || status === 'error') && (
             <button
@@ -122,13 +126,27 @@ export function DialogueStream({
               className={`group relative p-4 rounded-2xl bg-neutral-900/90 border border-neutral-800/80 border-l-4 ${styles.borderAccent} shadow-sm hover:border-neutral-700/80 transition-all`}
             >
               <div className="flex items-center justify-between gap-3 mb-2">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className={`text-[11px] font-medium px-2 py-0.5 rounded-full border ${styles.badgeBg}`}>
                     {msg.speaker || 'Speaker'}
                   </span>
                   {msg.detected_lang && (
                     <span className="text-[10px] uppercase tracking-wider text-neutral-400 px-1.5 py-0.5 rounded bg-neutral-800 font-mono">
                       {msg.detected_lang}
+                    </span>
+                  )}
+                  {msg.is_mismatch && msg.suggested_lang && (
+                    <span className="inline-flex items-center gap-1 text-[10px] bg-amber-500/15 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded-full font-medium">
+                      <span>Detected: {msg.suggested_lang}</span>
+                      {onSwitchLanguage && (
+                        <button
+                          onClick={() => onSwitchLanguage(msg.suggested_lang!)}
+                          className="underline font-bold hover:text-white cursor-pointer ml-1"
+                          title={`Switch source language to ${msg.suggested_lang}`}
+                        >
+                          Switch
+                        </button>
+                      )}
                     </span>
                   )}
                 </div>

@@ -6,10 +6,12 @@ import { blobToBase64 } from '@/lib/audio/audioPipeline';
 import { fetchWithRetry } from '@/lib/utils/retry';
 
 export interface UseTranslationStreamOptions {
+  selectedSourceLanguage?: string;
   onNewMessage?: (msg: TranslationMessage) => void;
   onInterimUpdate?: (msg: TranslationMessage | null) => void;
   onStatusChange?: (status: PipelineStatus) => void;
   onError?: (errorMsg: string) => void;
+  onLanguageMismatch?: (suggestedLang: string) => void;
 }
 
 function cleanDisplayString(str: string): string {
@@ -26,16 +28,22 @@ function cleanDisplayString(str: string): string {
 }
 
 export function useTranslationStream({
+  selectedSourceLanguage = 'edo',
   onNewMessage,
   onInterimUpdate,
   onStatusChange,
   onError,
+  onLanguageMismatch,
 }: UseTranslationStreamOptions = {}) {
   const [messages, setMessages] = useState<TranslationMessage[]>([]);
   const [interimMessage, setInterimMessage] = useState<TranslationMessage | null>(null);
   const [isTranslating, setIsTranslating] = useState(false);
   const [latestLatencyMs, setLatestLatencyMs] = useState<number | undefined>(undefined);
   const [sessionError, setSessionError] = useState<string | null>(null);
+
+  // Keep selectedSourceLanguage in a ref to avoid stale closures in callbacks
+  const sourceLangRef = useRef<string>(selectedSourceLanguage);
+  sourceLangRef.current = selectedSourceLanguage;
 
   // Rolling context memory (last 2 translated sentences)
   const contextHistoryRef = useRef<string[]>([]);
@@ -46,7 +54,12 @@ export function useTranslationStream({
   const sessionStartTimeRef = useRef<number>(0);
 
   const processAudioSlice = useCallback(
-    async (audioBlob: Blob, durationMs: number, isFinal: boolean) => {
+    async (
+      audioBlob: Blob,
+      durationMs: number,
+      isFinal: boolean,
+      overrideSourceLanguage?: string
+    ) => {
       const now = Date.now();
       if (sessionStartTimeRef.current === 0) {
         sessionStartTimeRef.current = now;
@@ -78,6 +91,7 @@ export function useTranslationStream({
 
       try {
         const audioBase64 = await blobToBase64(audioBlob);
+        const activeLang = overrideSourceLanguage || sourceLangRef.current || 'edo';
 
         // Send to Vercel SSE endpoint with exponential backoff retry
         const response = await fetchWithRetry(
@@ -90,6 +104,7 @@ export function useTranslationStream({
               mimeType: audioBlob.type || 'audio/wav',
               previousContext: contextHistoryRef.current.slice(-2),
               speaker: 'Speaker A',
+              sourceLanguage: activeLang,
             }),
           },
           { maxRetries: 2, initialDelayMs: 600 }
@@ -135,12 +150,19 @@ export function useTranslationStream({
                   const newMessage: TranslationMessage = {
                     id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
                     speaker: payload.speaker || 'Speaker A',
-                    detected_lang: payload.detected_lang || 'Esan / English',
+                    detected_lang: payload.detected_lang || 'Edo (Esan)',
                     transcription: cleanTranscription,
                     translation: cleanTranslation,
                     is_final: payload.is_final ?? true,
                     timestamp: Date.now(),
+                    is_mismatch: payload.is_mismatch,
+                    suggested_lang: payload.suggested_lang,
                   };
+
+                  // If a language mismatch is flagged, notify subscriber
+                  if (payload.is_mismatch && payload.suggested_lang) {
+                    onLanguageMismatch?.(payload.suggested_lang);
+                  }
 
                   // Update rolling context memory
                   contextHistoryRef.current.push(cleanTranslation);

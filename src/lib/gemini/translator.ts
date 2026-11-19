@@ -1,7 +1,9 @@
 import {
   UNIVERSAL_TRANSLATION_SYSTEM_PROMPT,
+  getSystemPromptForLanguage,
   buildTranslationPrompt,
 } from './prompts';
+import { getSourceLanguageByCode } from '@/config/languages';
 import { StreamChunkResponse } from '@/types/translation';
 
 export interface TranslateAudioChunkParams {
@@ -9,6 +11,7 @@ export interface TranslateAudioChunkParams {
   mimeType?: string;
   previousContext?: string[];
   speaker?: string;
+  sourceLanguage?: string;
 }
 
 /**
@@ -22,6 +25,7 @@ export async function translateAudioChunk({
   mimeType = 'audio/wav',
   previousContext = [],
   speaker = 'Speaker A',
+  sourceLanguage = 'edo',
 }: TranslateAudioChunkParams): Promise<StreamChunkResponse> {
   const openaiKey = process.env.OPENAI_API_KEY;
   const claudeKey = process.env.CLAUDE_KEY || process.env.ANTHROPIC_API_KEY;
@@ -36,6 +40,7 @@ export async function translateAudioChunk({
       claudeKey,
       previousContext,
       speaker,
+      sourceLanguage,
     });
   }
 
@@ -47,6 +52,7 @@ export async function translateAudioChunk({
       apiKey: geminiKey,
       previousContext,
       speaker,
+      sourceLanguage,
     });
   }
 
@@ -129,6 +135,7 @@ async function translateWithWhisperPipeline({
   claudeKey,
   previousContext = [],
   speaker = 'Speaker A',
+  sourceLanguage = 'edo',
 }: {
   audioBase64: string;
   mimeType?: string;
@@ -136,6 +143,7 @@ async function translateWithWhisperPipeline({
   claudeKey?: string;
   previousContext?: string[];
   speaker?: string;
+  sourceLanguage?: string;
 }): Promise<StreamChunkResponse> {
   try {
     // Step 1: Transcribe audio slice using OpenAI Whisper
@@ -158,16 +166,14 @@ async function translateWithWhisperPipeline({
     const filename = `audio.${ext}`;
     const blob = new Blob([bytes], { type: cleanMime });
 
+    const langConfig = getSourceLanguageByCode(sourceLanguage);
+
     const formData = new FormData();
     formData.append('file', blob, filename);
     formData.append('model', 'whisper-1');
     formData.append('response_format', 'json');
     formData.append('temperature', '0.0');
-    const multilingualPrompt =
-      previousContext && previousContext.length > 0
-        ? previousContext.slice(-2).join('. ')
-        : 'Multilingual speech translation to English. Spanish, French, Yoruba, Esan, Igbo, Hausa, Pidgin, German, Mandarin, Arabic, English.';
-    formData.append('prompt', multilingualPrompt);
+    formData.append('prompt', langConfig.whisperPrompt);
 
     const whisperRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
       method: 'POST',
@@ -206,6 +212,7 @@ async function translateWithWhisperPipeline({
         claudeKey,
         previousContext,
         speaker,
+        sourceLanguage,
       });
     } else {
       return refineWithGPT4oMini({
@@ -213,6 +220,7 @@ async function translateWithWhisperPipeline({
         openaiKey,
         previousContext,
         speaker,
+        sourceLanguage,
       });
     }
   } catch (err: unknown) {
@@ -273,11 +281,13 @@ function extractTranslationFields(
       if (parsed && typeof parsed === 'object') {
         let translation = typeof parsed.translation === 'string' ? parsed.translation : '';
         let transcription = typeof parsed.transcription === 'string' ? parsed.transcription : '';
-        let lang = typeof parsed.detected_lang === 'string' ? parsed.detected_lang.trim() : 'Auto-Detected';
+        let lang = typeof parsed.detected_lang === 'string' ? parsed.detected_lang.trim() : 'Edo (Esan)';
         let speaker = typeof parsed.speaker === 'string' ? parsed.speaker : fallbackSpeaker;
+        const isMismatch = Boolean(parsed.is_mismatch);
+        const suggestedLang = typeof parsed.suggested_lang === 'string' ? parsed.suggested_lang.trim() : '';
 
         if (!lang || lang.toLowerCase() === 'undefined' || lang.toLowerCase() === 'null') {
-          lang = 'Auto-Detected';
+          lang = 'Edo (Esan)';
         }
 
         translation = sanitizeCleanText(translation);
@@ -293,6 +303,8 @@ function extractTranslationFields(
           transcription: transcription || fallbackTranscript,
           translation,
           is_final: true,
+          is_mismatch: isMismatch,
+          suggested_lang: suggestedLang,
         };
       }
     }
@@ -311,14 +323,17 @@ function extractTranslationFields(
 
   const langMatch = cleaned.match(/"detected_lang"\s*:\s*"([^"]+)"/);
   const speakerMatch = cleaned.match(/"speaker"\s*:\s*"([^"]+)"/);
+  const is_mismatch = /"is_mismatch"\s*:\s*true/i.test(cleaned);
+  const suggestedMatch = cleaned.match(/"suggested_lang"\s*:\s*"([^"]+)"/);
+  const suggested_lang = suggestedMatch ? suggestedMatch[1].trim() : '';
 
   let translation = translationMatch ? translationMatch[1].trim() : '';
   let transcription = transcriptionMatch ? transcriptionMatch[1].trim() : fallbackTranscript;
-  let detected_lang = langMatch ? langMatch[1].trim() : 'Auto-Detected';
+  let detected_lang = langMatch ? langMatch[1].trim() : 'Edo (Esan)';
   let speaker = speakerMatch ? speakerMatch[1].trim() : fallbackSpeaker;
 
   if (!detected_lang || detected_lang.toLowerCase() === 'undefined') {
-    detected_lang = 'Auto-Detected';
+    detected_lang = 'Edo (Esan)';
   }
 
   // If translation was missing or was raw JSON
@@ -335,6 +350,8 @@ function extractTranslationFields(
     transcription: transcription || fallbackTranscript,
     translation: translation || fallbackTranscript,
     is_final: true,
+    is_mismatch,
+    suggested_lang,
   };
 }
 
@@ -346,14 +363,17 @@ async function refineWithClaude({
   claudeKey,
   previousContext = [],
   speaker = 'Speaker A',
+  sourceLanguage = 'edo',
 }: {
   rawTranscript: string;
   claudeKey: string;
   previousContext?: string[];
   speaker?: string;
+  sourceLanguage?: string;
 }): Promise<StreamChunkResponse> {
   try {
-    const promptText = buildTranslationPrompt(previousContext);
+    const promptText = buildTranslationPrompt(previousContext, sourceLanguage);
+    const systemPrompt = getSystemPromptForLanguage(sourceLanguage);
     const userMessage = `${promptText}\n\nSpoken acoustic transcript to translate:\n"${rawTranscript}"`;
 
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -366,7 +386,7 @@ async function refineWithClaude({
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 1000,
-        system: UNIVERSAL_TRANSLATION_SYSTEM_PROMPT,
+        system: systemPrompt,
         messages: [{ role: 'user', content: userMessage }],
       }),
     });
@@ -376,7 +396,7 @@ async function refineWithClaude({
       console.warn('[Claude] Refinement error, returning raw transcript:', err);
       return {
         speaker,
-        detected_lang: 'Auto-Detected',
+        detected_lang: 'Edo (Esan)',
         transcription: rawTranscript,
         translation: rawTranscript,
         is_final: true,
@@ -389,7 +409,7 @@ async function refineWithClaude({
   } catch (err) {
     return {
       speaker,
-      detected_lang: 'Auto-Detected',
+      detected_lang: 'Edo (Esan)',
       transcription: rawTranscript,
       translation: rawTranscript,
       is_final: true,
@@ -405,14 +425,17 @@ async function refineWithGPT4oMini({
   openaiKey,
   previousContext = [],
   speaker = 'Speaker A',
+  sourceLanguage = 'edo',
 }: {
   rawTranscript: string;
   openaiKey: string;
   previousContext?: string[];
   speaker?: string;
+  sourceLanguage?: string;
 }): Promise<StreamChunkResponse> {
   try {
-    const promptText = buildTranslationPrompt(previousContext);
+    const promptText = buildTranslationPrompt(previousContext, sourceLanguage);
+    const systemPrompt = getSystemPromptForLanguage(sourceLanguage);
 
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -424,7 +447,7 @@ async function refineWithGPT4oMini({
         model: 'gpt-4o-mini',
         response_format: { type: 'json_object' },
         messages: [
-          { role: 'system', content: UNIVERSAL_TRANSLATION_SYSTEM_PROMPT },
+          { role: 'system', content: systemPrompt },
           {
             role: 'user',
             content: `${promptText}\n\nSpoken acoustic transcript to translate:\n"${rawTranscript}"`,
@@ -437,7 +460,7 @@ async function refineWithGPT4oMini({
     if (!res.ok) {
       return {
         speaker,
-        detected_lang: 'Auto-Detected',
+        detected_lang: 'Edo (Esan)',
         transcription: rawTranscript,
         translation: rawTranscript,
         is_final: true,
@@ -450,7 +473,7 @@ async function refineWithGPT4oMini({
   } catch {
     return {
       speaker,
-      detected_lang: 'Auto-Detected',
+      detected_lang: 'Edo (Esan)',
       transcription: rawTranscript,
       translation: rawTranscript,
       is_final: true,
@@ -512,21 +535,24 @@ async function translateWithGemini({
   apiKey,
   previousContext = [],
   speaker = 'Speaker A',
+  sourceLanguage = 'edo',
 }: {
   audioBase64: string;
   mimeType: string;
   apiKey: string;
   previousContext?: string[];
   speaker?: string;
+  sourceLanguage?: string;
 }): Promise<StreamChunkResponse> {
-  const promptText = buildTranslationPrompt(previousContext);
+  const promptText = buildTranslationPrompt(previousContext, sourceLanguage);
+  const systemPrompt = getSystemPromptForLanguage(sourceLanguage);
 
   try {
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent`;
 
     const requestBody = {
       system_instruction: {
-        parts: [{ text: UNIVERSAL_TRANSLATION_SYSTEM_PROMPT }],
+        parts: [{ text: systemPrompt }],
       },
       contents: [
         {
@@ -598,10 +624,12 @@ async function translateWithGemini({
 
     return {
       speaker: parsed.speaker || speaker,
-      detected_lang: parsed.detected_lang || 'Auto-Detected',
+      detected_lang: parsed.detected_lang || 'Edo (Esan)',
       transcription: parsed.transcription || '',
       translation: parsed.translation || '',
       is_final: parsed.is_final ?? true,
+      is_mismatch: Boolean(parsed.is_mismatch),
+      suggested_lang: parsed.suggested_lang || '',
     };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown translation failure.';

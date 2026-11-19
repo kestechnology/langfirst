@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Header } from '@/components/Header';
 import { DialogueStream } from '@/components/DialogueStream';
 import { AudioControlBar } from '@/components/AudioControlBar';
@@ -11,8 +11,12 @@ import { TranslationMessage, PipelineStatus } from '@/types/translation';
 import { useAudioPipeline } from '@/hooks/useAudioPipeline';
 import { useTranslationStream } from '@/hooks/useTranslationStream';
 import { saveSession } from '@/lib/storage/transcriptStorage';
+import { DEFAULT_SOURCE_LANGUAGE, getSourceLanguageByCode, SUPPORTED_SOURCE_LANGUAGES } from '@/config/languages';
+import { AlertCircle, X } from 'lucide-react';
 
 export default function Home() {
+  const [selectedSourceLanguage, setSelectedSourceLanguage] = useState<string>(DEFAULT_SOURCE_LANGUAGE.code);
+  const [suggestedSwitch, setSuggestedSwitch] = useState<{ langName: string; langCode: string } | null>(null);
   const [isBilingual, setIsBilingual] = useState<boolean>(true);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
@@ -23,6 +27,30 @@ export default function Home() {
 
   useEffect(() => {
     setIsMounted(true);
+  }, []);
+
+  const currentLanguageConfig = getSourceLanguageByCode(selectedSourceLanguage);
+
+  const handleLanguageMismatch = useCallback((suggestedLang: string) => {
+    const match = SUPPORTED_SOURCE_LANGUAGES.find(
+      (l) =>
+        l.name.toLowerCase().includes(suggestedLang.toLowerCase()) ||
+        suggestedLang.toLowerCase().includes(l.name.toLowerCase())
+    );
+    setSuggestedSwitch({
+      langName: suggestedLang,
+      langCode: match ? match.code : 'auto',
+    });
+  }, []);
+
+  const handleSwitchLanguage = useCallback((langNameOrCode: string) => {
+    const match = SUPPORTED_SOURCE_LANGUAGES.find(
+      (l) =>
+        l.code.toLowerCase() === langNameOrCode.toLowerCase() ||
+        l.name.toLowerCase().includes(langNameOrCode.toLowerCase())
+    );
+    setSelectedSourceLanguage(match ? match.code : 'auto');
+    setSuggestedSwitch(null);
   }, []);
 
   // Translation stream hook
@@ -36,18 +64,20 @@ export default function Home() {
     clearMessages,
     setManualMessages,
   } = useTranslationStream({
+    selectedSourceLanguage,
     onNewMessage: (newMsg) => {
       saveSession([...messages, newMsg]);
     },
+    onLanguageMismatch: handleLanguageMismatch,
   });
 
   // Audio Pipeline for live Web Audio capture, rolling slicing & volume metering
   const handleAudioChunkReady = React.useCallback(
     (chunkBlob: Blob, durationMs: number) => {
       console.log(`[AudioPipeline] Captured speech slice: ${chunkBlob.size} bytes (${durationMs}ms)`);
-      processAudioSlice(chunkBlob, durationMs, true);
+      processAudioSlice(chunkBlob, durationMs, true, selectedSourceLanguage);
     },
-    [processAudioSlice]
+    [processAudioSlice, selectedSourceLanguage]
   );
 
   const {
@@ -135,7 +165,40 @@ export default function Home() {
         onOpenHistory={() => setIsHistoryOpen(true)}
         onGenerateReport={handleGenerateReport}
         messageCount={messages.length}
+        selectedSourceLanguage={selectedSourceLanguage}
+        onSelectSourceLanguage={setSelectedSourceLanguage}
       />
+
+      {/* Language Mismatch Suggestion Banner */}
+      {suggestedSwitch && (
+        <div className="bg-amber-950/70 border-b border-amber-700/60 px-4 py-2 text-xs text-amber-200 flex items-center justify-between gap-3 animate-in fade-in duration-200">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>
+              Speaker sounds like they are speaking <strong>{suggestedSwitch.langName}</strong> (different from selected{' '}
+              <strong>{currentLanguageConfig.name}</strong>).
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => {
+                setSelectedSourceLanguage(suggestedSwitch.langCode);
+                setSuggestedSwitch(null);
+              }}
+              className="px-2.5 py-1 rounded-md bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 hover:text-white font-medium transition-colors border border-amber-500/40 cursor-pointer"
+            >
+              Switch to {suggestedSwitch.langName}
+            </button>
+            <button
+              onClick={() => setSuggestedSwitch(null)}
+              className="text-neutral-400 hover:text-white p-1 cursor-pointer"
+              title="Dismiss suggestion"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Error banner if microphone access or session fails */}
       {(audioError || sessionError) && (
@@ -151,6 +214,8 @@ export default function Home() {
         status={currentStatus}
         isBilingual={isBilingual}
         onStartListening={handleToggleMic}
+        selectedLanguageName={currentLanguageConfig.name}
+        onSwitchLanguage={handleSwitchLanguage}
       />
 
       {/* Bottom Audio Control Bar */}
@@ -167,6 +232,7 @@ export default function Home() {
         onClose={() => setIsUploadOpen(false)}
         onBatchComplete={(newMsgs) => setManualMessages([...messages, ...newMsgs])}
         onProcessSlice={processAudioSlice}
+        selectedSourceLanguage={selectedSourceLanguage}
       />
 
       {/* History & Export Drawer */}
