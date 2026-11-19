@@ -9,6 +9,7 @@ interface AudioControlBarProps {
   audioLevel: number; // 0 to 1
   onToggleMic: () => void;
   latencyMs?: number;
+  selectedLanguageName?: string;
 }
 
 export function AudioControlBar({
@@ -16,6 +17,7 @@ export function AudioControlBar({
   audioLevel,
   onToggleMic,
   latencyMs,
+  selectedLanguageName,
 }: AudioControlBarProps) {
   const isListening =
     status === 'listening' ||
@@ -46,9 +48,9 @@ export function AudioControlBar({
       <div className="max-w-xl mx-auto flex items-center justify-between gap-4">
         {/* Latency & Status info on left */}
         <div className="hidden sm:flex flex-col text-left">
-          <span className="text-[11px] text-neutral-400 font-medium flex items-center gap-1.5">
-            <Radio className="w-3.5 h-3.5 text-indigo-400" />
-            Vercel + Whisper & Claude
+          <span className="text-[11px] text-neutral-300 font-medium flex items-center gap-1.5">
+            <Radio className="w-3.5 h-3.5 text-emerald-400" />
+            Listening for: <span className="text-white font-semibold">{selectedLanguageName || 'Edo (Central Edo)'}</span>
           </span>
           <span className="text-[10px] text-neutral-500 font-mono">
             {latencyMs ? `Latency: ~${latencyMs}ms` : 'Ready'}

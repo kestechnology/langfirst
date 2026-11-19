@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { audio, mimeType, previousContext, speaker } = body;
+    const { audio, mimeType, previousContext, speaker, sourceLanguage } = body;
 
     if (!audio) {
       return new Response(JSON.stringify({ error: 'Audio chunk data is required.' }), {
@@ -46,12 +46,13 @@ export async function POST(req: NextRequest) {
             )
           );
 
-          // Process direct audio translation via Gemini 2.0 Flash
+          // Process direct audio translation
           const result = await translateAudioChunk({
             audioBase64: audio,
             mimeType: mimeType || 'audio/wav',
             previousContext: Array.isArray(previousContext) ? previousContext : [],
             speaker: speaker || 'Speaker A',
+            sourceLanguage: sourceLanguage || 'edo',
           });
 
           // Emit final translation chunk to client

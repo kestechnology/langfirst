@@ -9,7 +9,8 @@ interface AudioUploadModalProps {
   isOpen: boolean;
   onClose: () => void;
   onBatchComplete: (messages: TranslationMessage[]) => void;
-  onProcessSlice: (blob: Blob, durationMs: number, isFinal: boolean) => Promise<void>;
+  onProcessSlice: (blob: Blob, durationMs: number, isFinal: boolean, overrideLang?: string) => Promise<void>;
+  selectedSourceLanguage?: string;
 }
 
 export function AudioUploadModal({
@@ -17,6 +18,7 @@ export function AudioUploadModal({
   onClose,
   onBatchComplete,
   onProcessSlice,
+  selectedSourceLanguage = 'edo',
 }: AudioUploadModalProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -83,7 +85,12 @@ export function AudioUploadModal({
       for (let i = 0; i < slices.length; i++) {
         setCurrentSliceIndex(i + 1);
         const slice = slices[i];
-        await onProcessSlice(slice.blob, slice.durationSec * 1000, i === slices.length - 1);
+        await onProcessSlice(
+          slice.blob,
+          slice.durationSec * 1000,
+          i === slices.length - 1,
+          selectedSourceLanguage
+        );
       }
 
       setStatus('done');

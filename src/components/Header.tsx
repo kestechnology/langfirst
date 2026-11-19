@@ -2,7 +2,8 @@
 
 import React from 'react';
 import { PipelineStatus } from '@/types/translation';
-import { AlertCircle, FileText, History, Languages, Loader2, Sparkles, Upload } from 'lucide-react';
+import { AlertCircle, ChevronDown, FileText, History, Languages, Loader2, Sparkles, Upload } from 'lucide-react';
+import { SUPPORTED_SOURCE_LANGUAGES } from '@/config/languages';
 
 interface HeaderProps {
   status: PipelineStatus;
@@ -13,6 +14,8 @@ interface HeaderProps {
   onOpenHistory: () => void;
   onGenerateReport: () => void;
   messageCount: number;
+  selectedSourceLanguage: string;
+  onSelectSourceLanguage: (langCode: string) => void;
 }
 
 export function Header({
@@ -24,6 +27,8 @@ export function Header({
   onOpenHistory,
   onGenerateReport,
   messageCount,
+  selectedSourceLanguage,
+  onSelectSourceLanguage,
 }: HeaderProps) {
   const getStatusBadge = () => {
     switch (status) {
@@ -90,11 +95,28 @@ export function Header({
                 Live
               </span>
             </div>
-            <p className="text-xs text-neutral-400 flex items-center gap-1.5">
-              <span>Esan (Central Edo)</span>
-              <span className="text-neutral-600">→</span>
-              <span className="text-neutral-200 font-medium">English</span>
-            </p>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <div className="relative inline-flex items-center">
+                <select
+                  value={selectedSourceLanguage}
+                  onChange={(e) => onSelectSourceLanguage(e.target.value)}
+                  className="appearance-none bg-neutral-900 hover:bg-neutral-850 text-indigo-300 hover:text-white text-xs font-medium pl-2 pr-5 py-0.5 rounded-md border border-neutral-800 hover:border-neutral-700 transition-colors cursor-pointer focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  aria-label="Speaker language selector"
+                  title="Speaker language (Edo by default)"
+                >
+                  {SUPPORTED_SOURCE_LANGUAGES.map((lang) => (
+                    <option key={lang.code} value={lang.code} className="bg-neutral-900 text-neutral-100">
+                      {lang.name} {lang.isDefault ? '★ (Default)' : ''}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="w-3 h-3 text-neutral-400 absolute right-1.5 pointer-events-none" />
+              </div>
+              <span className="text-neutral-600 text-xs font-mono">→</span>
+              <span className="text-neutral-200 text-xs font-medium px-1.5 py-0.5 rounded bg-neutral-900 border border-neutral-800">
+                English
+              </span>
+            </div>
           </div>
         </div>
 

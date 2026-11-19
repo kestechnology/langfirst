@@ -14,6 +14,8 @@ export interface TranslationMessage {
   translation: string;
   is_final: boolean;
   timestamp: number;
+  is_mismatch?: boolean;
+  suggested_lang?: string;
 }
 
 export interface StreamChunkResponse {
@@ -23,4 +25,6 @@ export interface StreamChunkResponse {
   translation?: string;
   is_final?: boolean;
   error?: string;
+  is_mismatch?: boolean;
+  suggested_lang?: string;
 }
